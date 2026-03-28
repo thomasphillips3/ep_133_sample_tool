@@ -24,6 +24,8 @@ import com.ep133.sampletool.ui.chords.ChordsViewModel
 import com.ep133.sampletool.ui.device.DeviceViewModel
 import com.ep133.sampletool.ui.pads.PadsViewModel
 import com.ep133.sampletool.ui.sounds.SoundsViewModel
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -65,12 +67,14 @@ class MainActivity : ComponentActivity() {
         val deviceViewModel = DeviceViewModel(midiRepo)
 
         setContent {
+            val deviceState by midiRepo.deviceState.collectAsState()
             EP133App(
                 padsViewModel = padsViewModel,
                 beatsViewModel = beatsViewModel,
                 soundsViewModel = soundsViewModel,
                 chordsViewModel = chordsViewModel,
                 deviceViewModel = deviceViewModel,
+                isConnected = deviceState.connected,
             )
         }
 

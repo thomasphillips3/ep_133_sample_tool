@@ -1,8 +1,12 @@
 package com.ep133.sampletool.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.platform.LocalContext
 import com.ep133.sampletool.SampleManagerActivity
 import androidx.compose.material.icons.Icons
@@ -11,6 +15,7 @@ import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.ViewWeek
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -19,10 +24,12 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -30,6 +37,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.ep133.sampletool.ui.theme.TEColors
 import com.ep133.sampletool.ui.beats.BeatsScreen
 import com.ep133.sampletool.ui.beats.BeatsViewModel
 import com.ep133.sampletool.ui.chords.ChordsScreen
@@ -61,6 +69,7 @@ fun EP133App(
     soundsViewModel: SoundsViewModel,
     chordsViewModel: ChordsViewModel,
     deviceViewModel: DeviceViewModel,
+    isConnected: Boolean = false,
 ) {
     EP133Theme {
         val navController = rememberNavController()
@@ -88,10 +97,29 @@ fun EP133App(
                                 }
                             },
                             icon = {
-                                Icon(
-                                    imageVector = item.icon,
-                                    contentDescription = item.label,
-                                )
+                                if (item == NavRoute.DEVICE) {
+                                    BadgedBox(
+                                        badge = {
+                                            if (isConnected) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(8.dp)
+                                                        .background(TEColors.Teal, CircleShape),
+                                                )
+                                            }
+                                        },
+                                    ) {
+                                        Icon(
+                                            imageVector = item.icon,
+                                            contentDescription = item.label,
+                                        )
+                                    }
+                                } else {
+                                    Icon(
+                                        imageVector = item.icon,
+                                        contentDescription = item.label,
+                                    )
+                                }
                             },
                             label = {
                                 Text(
