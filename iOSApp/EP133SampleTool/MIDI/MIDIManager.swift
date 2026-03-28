@@ -2,22 +2,13 @@ import CoreMIDI
 import Foundation
 
 /// Manages CoreMIDI USB device discovery, input, and output.
-final class MIDIManager {
+/// Conforms to MIDIPort — Phase 3 ViewModels depend on the protocol, not this class.
+final class MIDIManager: MIDIPort {
 
-    struct MIDIDevice {
-        let id: String
-        let name: String
-    }
-
-    struct DeviceList {
-        let inputs: [MIDIDevice]
-        let outputs: [MIDIDevice]
-    }
-
-    /// Called when MIDI data arrives from a device.  (portId, bytes)
+    /// Called on the main thread when MIDI data arrives from a device.  (portId, bytes)
     var onMIDIReceived: ((String, [UInt8]) -> Void)?
 
-    /// Called when MIDI devices are connected or disconnected.
+    /// Called on the main thread when MIDI devices are connected or disconnected.
     var onDevicesChanged: (() -> Void)?
 
     private var midiClient: MIDIClientRef = 0
@@ -59,7 +50,7 @@ final class MIDIManager {
 
     // MARK: - Device Enumeration
 
-    func getUSBDevices() -> DeviceList {
+    func getUSBDevices() -> MIDIDeviceList {
         var inputs: [MIDIDevice] = []
         var outputs: [MIDIDevice] = []
 
@@ -79,8 +70,16 @@ final class MIDIManager {
             }
         }
 
-        return DeviceList(inputs: inputs, outputs: outputs)
+        return MIDIDeviceList(inputs: inputs, outputs: outputs)
     }
+
+    // MARK: - MIDIPort stub methods (Phase 3 will implement)
+
+    /// No-op in Phase 1 — MIDIManager auto-connects to all sources in setup().
+    func startListening(portId: String) {}
+
+    /// No-op in Phase 1.
+    func stopListening(portId: String) {}
 
     // MARK: - Send MIDI
 
