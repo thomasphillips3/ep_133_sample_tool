@@ -3,6 +3,8 @@ package com.ep133.sampletool.domain.midi
 import android.util.Log
 import com.ep133.sampletool.domain.model.DeviceState
 import com.ep133.sampletool.domain.model.MidiPort
+import com.ep133.sampletool.domain.model.PermissionState
+import com.ep133.sampletool.midi.MIDIManager
 import com.ep133.sampletool.midi.MIDIPort
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -42,18 +44,23 @@ open class MIDIRepository(private val midiManager: MIDIPort) {
         val devices = midiManager.getUSBDevices()
         val connected = devices.inputs.isNotEmpty() || devices.outputs.isNotEmpty()
         val outputPort = devices.outputs.firstOrNull()
+        val permState = (midiManager as? MIDIManager)?.currentPermissionState
+            ?: PermissionState.UNKNOWN
         _deviceState.value = DeviceState(
             connected = connected,
             deviceName = outputPort?.name ?: "",
             outputPortId = outputPort?.id,
             inputPorts = devices.inputs.map { MidiPort(it.id, it.name) },
             outputPorts = devices.outputs.map { MidiPort(it.id, it.name) },
+            permissionState = permState,
         )
         // Close stale listeners and re-establish on current ports
         midiManager.closeAllListeners()
         for (input in devices.inputs) {
             midiManager.startListening(input.id)
         }
+        // Pre-warm send port so sequencer noteOn is immediate
+        outputPort?.id?.let { midiManager.prewarmSendPort(it) }
     }
 
     private fun parseMidiInput(data: ByteArray) {
@@ -82,12 +89,15 @@ open class MIDIRepository(private val midiManager: MIDIPort) {
         val devices = midiManager.getUSBDevices()
         val connected = devices.inputs.isNotEmpty() || devices.outputs.isNotEmpty()
         val outputPort = devices.outputs.firstOrNull()
+        val permState = (midiManager as? MIDIManager)?.currentPermissionState
+            ?: PermissionState.UNKNOWN
         _deviceState.value = DeviceState(
             connected = connected,
             deviceName = outputPort?.name ?: "",
             outputPortId = outputPort?.id,
             inputPorts = devices.inputs.map { MidiPort(it.id, it.name) },
             outputPorts = devices.outputs.map { MidiPort(it.id, it.name) },
+            permissionState = permState,
         )
     }
 
@@ -142,6 +152,44 @@ open class MIDIRepository(private val midiManager: MIDIPort) {
 
     fun allNotesOff(ch: Int = channel) {
         controlChange(123, 0, ch)
+    }
+
+    /**
+     * Load a factory sound onto a pad via note-on (select pad) → Bank Select → Program Change.
+     *
+     * The EP-133 assigns sounds to the last-played pad, so we must send a note-on
+     * first to select the target. All messages are sent as a single byte array to
+     * guarantee ordering through the async port path.
+     *
+     * Sound numbers are 1-999 (EP-133 factory library).
+     */
+    fun loadSoundToPad(soundNumber: Int, padNote: Int, padChannel: Int, ch: Int = channel) {
+        val portId = _deviceState.value.outputPortId ?: return
+        val index = (soundNumber - 1).coerceAtLeast(0)
+        val bankMsb = index / 128
+        val program = index % 128
+        Log.d("EP133APP", "MIDI OUT: loadSound #$soundNumber → pad note=$padNote padCh=$padChannel bank=$bankMsb pc=$program ch=$ch")
+
+        // Select the target pad with a brief note-on/off, then send bank+program as
+        // one contiguous byte array so ordering is preserved through the async port.
+        val noteOnStatus = (0x90 or (padChannel and 0x0F)).toByte()
+        val noteOffStatus = (0x80 or (padChannel and 0x0F)).toByte()
+        val ccStatus = (0xB0 or (ch and 0x0F)).toByte()
+        val pcStatus = (0xC0 or (ch and 0x0F)).toByte()
+        val padNoteByte = (padNote and 0x7F).toByte()
+
+        midiManager.sendMidi(portId, byteArrayOf(
+            // 1) Note-on to select the pad
+            noteOnStatus, padNoteByte, 100.toByte(),
+            // 2) Note-off
+            noteOffStatus, padNoteByte, 0,
+            // 3) CC 0 — Bank Select MSB
+            ccStatus, 0, (bankMsb and 0x7F).toByte(),
+            // 4) CC 32 — Bank Select LSB
+            ccStatus, 32, 0,
+            // 5) Program Change
+            pcStatus, (program and 0x7F).toByte(),
+        ))
     }
 
     fun requestUSBPermissions() {

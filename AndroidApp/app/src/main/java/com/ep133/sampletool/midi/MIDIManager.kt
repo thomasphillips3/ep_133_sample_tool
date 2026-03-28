@@ -16,6 +16,7 @@ import android.media.midi.MidiReceiver
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.ep133.sampletool.domain.model.PermissionState
 
 /**
  * Manages USB MIDI device discovery, input, and output using android.media.midi.
@@ -34,6 +35,10 @@ class MIDIManager(
 
     override var onMidiReceived: ((String, ByteArray) -> Unit)? = null
     override var onDevicesChanged: (() -> Unit)? = null
+
+    /** Current USB permission lifecycle state. Read by MIDIRepository to populate DeviceState. */
+    var currentPermissionState: PermissionState = PermissionState.UNKNOWN
+        private set
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
@@ -61,11 +66,13 @@ class MIDIManager(
                 val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
                 Log.i(TAG, "USB permission ${if (granted) "granted" else "denied"} for ${device?.productName}")
                 if (granted) {
-                    // MIDI device should now appear — notify after a short delay
-                    // to give the MIDI service time to enumerate
-                    mainHandler.postDelayed({
-                        notifyDevicesChanged()
-                    }, 500)
+                    // The authoritative trigger for re-enumeration after permission grant
+                    // is deviceCallback.onDeviceAdded() — no manual delay needed (D-09).
+                    currentPermissionState = PermissionState.GRANTED
+                    notifyDevicesChanged()
+                } else {
+                    currentPermissionState = PermissionState.DENIED
+                    notifyDevicesChanged()
                 }
             }
         }
@@ -143,6 +150,10 @@ class MIDIManager(
 
             if (!usbManager.hasPermission(device)) {
                 Log.i(TAG, "  Requesting permission for ${device.productName}")
+                // Set AWAITING BEFORE calling requestPermission — the system dialog appears
+                // asynchronously, so state must reflect "awaiting" while dialog is showing (D-19).
+                currentPermissionState = PermissionState.AWAITING
+                notifyDevicesChanged()
                 val permissionIntent = PendingIntent.getBroadcast(
                     context,
                     0,
