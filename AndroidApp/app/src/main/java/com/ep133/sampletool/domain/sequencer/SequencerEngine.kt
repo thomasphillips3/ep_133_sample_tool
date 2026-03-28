@@ -5,10 +5,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /** One track in the sequencer. */
@@ -32,6 +34,9 @@ data class SeqTrack(
     override fun hashCode(): Int = name.hashCode() * 31 + steps.contentHashCode()
 }
 
+/** EDIT = user-programmed sequencer, LIVE = capturing incoming MIDI from EP-133. */
+enum class BeatsMode { EDIT, LIVE }
+
 /** Sequencer state exposed to the UI. */
 data class SeqState(
     val bpm: Int = 120,
@@ -39,6 +44,11 @@ data class SeqState(
     val currentStep: Int = -1,
     val tracks: List<SeqTrack> = DEFAULT_TRACKS,
     val selectedTrack: Int = 0,
+    val mode: BeatsMode = BeatsMode.EDIT,
+    /** LIVE mode: maps MIDI note → set of step indices where that note was seen. */
+    val liveGrid: Map<Int, Set<Int>> = emptyMap(),
+    /** LIVE mode: current step position of the capture clock. */
+    val liveCurrentStep: Int = -1,
 ) {
     companion object {
         val DEFAULT_TRACKS = listOf(
@@ -64,11 +74,15 @@ class SequencerEngine(private val midi: MIDIRepository) {
     val state: StateFlow<SeqState> = _state.asStateFlow()
 
     private var playJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.Default)
+    private var liveJob: Job? = null
+    private val job = SupervisorJob()
+    private val scope = CoroutineScope(Dispatchers.Default + job)
+
+    // ── EDIT mode ───────────────────────────────────────
 
     fun play() {
         if (_state.value.playing) return
-        _state.value = _state.value.copy(playing = true, currentStep = -1)
+        _state.update { it.copy(playing = true, currentStep = -1) }
         playJob = scope.launch { playLoop() }
     }
 
@@ -76,47 +90,88 @@ class SequencerEngine(private val midi: MIDIRepository) {
         playJob?.cancel()
         playJob = null
         midi.allNotesOff()
-        _state.value = _state.value.copy(playing = false)
+        _state.update { it.copy(playing = false) }
     }
 
     fun stop() {
         pause()
-        _state.value = _state.value.copy(currentStep = -1)
+        _state.update { it.copy(currentStep = -1) }
     }
 
     fun toggleStep(trackIndex: Int, stepIndex: Int) {
-        val tracks = _state.value.tracks.toMutableList()
-        val track = tracks[trackIndex]
-        val steps = track.steps.copyOf()
-        steps[stepIndex] = if (steps[stepIndex] > 0) 0 else 1
-        tracks[trackIndex] = track.copy(steps = steps)
-        _state.value = _state.value.copy(tracks = tracks)
+        _state.update { s ->
+            val tracks = s.tracks.toMutableList()
+            val track = tracks[trackIndex]
+            val steps = track.steps.copyOf()
+            steps[stepIndex] = if (steps[stepIndex] > 0) 0 else 1
+            tracks[trackIndex] = track.copy(steps = steps)
+            s.copy(tracks = tracks)
+        }
     }
 
     fun setBpm(bpm: Int) {
-        _state.value = _state.value.copy(bpm = bpm.coerceIn(40, 300))
+        _state.update { it.copy(bpm = bpm.coerceIn(40, 300)) }
     }
 
-    fun adjustBpm(delta: Int) {
-        setBpm(_state.value.bpm + delta)
-    }
+    fun adjustBpm(delta: Int) = setBpm(_state.value.bpm + delta)
 
     fun selectTrack(index: Int) {
-        _state.value = _state.value.copy(
-            selectedTrack = index.coerceIn(0, _state.value.tracks.lastIndex)
-        )
+        _state.update { it.copy(selectedTrack = index.coerceIn(0, it.tracks.lastIndex)) }
     }
 
     fun clearTrack(trackIndex: Int) {
-        val tracks = _state.value.tracks.toMutableList()
-        tracks[trackIndex] = tracks[trackIndex].copy(steps = IntArray(STEP_COUNT) { 0 })
-        _state.value = _state.value.copy(tracks = tracks)
+        _state.update { s ->
+            val tracks = s.tracks.toMutableList()
+            tracks[trackIndex] = tracks[trackIndex].copy(steps = IntArray(STEP_COUNT) { 0 })
+            s.copy(tracks = tracks)
+        }
     }
 
     fun clearAll() {
-        val tracks = _state.value.tracks.map { it.copy(steps = IntArray(STEP_COUNT) { 0 }) }
-        _state.value = _state.value.copy(tracks = tracks)
+        _state.update { s ->
+            s.copy(tracks = s.tracks.map { it.copy(steps = IntArray(STEP_COUNT) { 0 }) })
+        }
     }
+
+    // ── LIVE mode ───────────────────────────────────────
+
+    fun setMode(mode: BeatsMode) {
+        if (mode == BeatsMode.EDIT) stopLiveCapture()
+        _state.update { it.copy(mode = mode) }
+    }
+
+    fun startLiveCapture() {
+        stopLiveCapture()
+        _state.update { it.copy(mode = BeatsMode.LIVE, liveGrid = emptyMap(), liveCurrentStep = 0) }
+        liveJob = scope.launch { liveCaptureLoop() }
+    }
+
+    fun stopLiveCapture() {
+        liveJob?.cancel()
+        liveJob = null
+        _state.update { it.copy(liveCurrentStep = -1) }
+    }
+
+    /** Called from ViewModel when incoming MIDI note arrives. */
+    fun recordIncomingNote(note: Int) {
+        _state.update { s ->
+            if (s.mode != BeatsMode.LIVE || s.liveCurrentStep < 0) return@update s
+            val grid = s.liveGrid.toMutableMap()
+            val existing = grid[note]?.toMutableSet() ?: mutableSetOf()
+            existing.add(s.liveCurrentStep)
+            grid[note] = existing
+            s.copy(liveGrid = grid)
+        }
+    }
+
+    fun clearLiveGrid() {
+        _state.update { it.copy(liveGrid = emptyMap()) }
+    }
+
+    /** Cancel all running coroutines. Call from Activity.onDestroy() to prevent leaks. */
+    fun close() { job.cancel() }
+
+    // ── Internal loops ──────────────────────────────────
 
     private suspend fun playLoop() {
         val startTime = System.nanoTime()
@@ -126,7 +181,7 @@ class SequencerEngine(private val midi: MIDIRepository) {
             while (true) {
                 val currentState = _state.value
                 val step = (stepCount % STEP_COUNT).toInt()
-                _state.value = currentState.copy(currentStep = step)
+                _state.update { it.copy(currentStep = step) }
 
                 // Fire notes for active steps
                 currentState.tracks.forEach { track ->
@@ -149,15 +204,31 @@ class SequencerEngine(private val midi: MIDIRepository) {
 
                 stepCount++
 
-                // Drift-compensated delay — compare elapsed vs expected time
+                // Drift-compensated delay
                 val expectedNanos = startTime + (stepCount * stepDurationMs * 1_000_000).toLong()
                 val sleepNanos = expectedNanos - System.nanoTime()
                 if (sleepNanos > 0) {
                     delay(sleepNanos / 1_000_000)
                 }
             }
-        } catch (_: CancellationException) {
-            // Normal stop
-        }
+        } catch (_: CancellationException) {}
+    }
+
+    private suspend fun liveCaptureLoop() {
+        val startTime = System.nanoTime()
+        var stepCount = 0L
+
+        try {
+            while (true) {
+                val step = (stepCount % STEP_COUNT).toInt()
+                _state.update { it.copy(liveCurrentStep = step) }
+                stepCount++
+
+                val stepDurationMs = 60_000.0 / _state.value.bpm / 4.0
+                val expectedNanos = startTime + (stepCount * stepDurationMs * 1_000_000).toLong()
+                val sleepNanos = expectedNanos - System.nanoTime()
+                if (sleepNanos > 0) delay(sleepNanos / 1_000_000)
+            }
+        } catch (_: CancellationException) {}
     }
 }
