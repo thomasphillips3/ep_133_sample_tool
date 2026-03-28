@@ -17,15 +17,13 @@ import com.ep133.sampletool.domain.midi.ChordPlayer
 import com.ep133.sampletool.domain.midi.MIDIRepository
 import com.ep133.sampletool.domain.sequencer.SequencerEngine
 import com.ep133.sampletool.midi.MIDIManager
+import androidx.lifecycle.lifecycleScope
 import com.ep133.sampletool.ui.EP133App
 import com.ep133.sampletool.ui.beats.BeatsViewModel
 import com.ep133.sampletool.ui.chords.ChordsViewModel
 import com.ep133.sampletool.ui.device.DeviceViewModel
 import com.ep133.sampletool.ui.pads.PadsViewModel
 import com.ep133.sampletool.ui.sounds.SoundsViewModel
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -36,8 +34,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var sequencer: SequencerEngine
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(Dispatchers.Main)
-    private var screenOnJob: Job? = null
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -91,7 +87,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun observeScreenOnState() {
-        screenOnJob = scope.launch {
+        lifecycleScope.launch {
             sequencer.state.collectLatest { state ->
                 if (state.playing) {
                     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -104,7 +100,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        screenOnJob?.cancel()
+        sequencer.close()
         try {
             unregisterReceiver(usbReceiver)
         } catch (_: IllegalArgumentException) {
