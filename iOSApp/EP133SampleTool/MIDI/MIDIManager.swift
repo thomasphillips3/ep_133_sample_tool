@@ -174,7 +174,11 @@ final class MIDIManager {
             // Determine the source port ID
             let portId = srcRefCon.map { String(Int(bitPattern: $0)) } ?? "unknown"
 
-            onMIDIReceived?(portId, bytes)
+            let capturedPortId = portId
+            let capturedBytes = bytes
+            DispatchQueue.main.async { [weak self] in
+                self?.onMIDIReceived?(capturedPortId, capturedBytes)
+            }
 
             withUnsafePointer(to: &packet) { ptr in
                 let next = MIDIEventPacketNext(ptr)
