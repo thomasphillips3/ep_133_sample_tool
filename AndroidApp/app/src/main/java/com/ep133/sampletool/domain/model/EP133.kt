@@ -62,6 +62,11 @@ data class DeviceState(
     val inputPorts: List<MidiPort> = emptyList(),
     val outputPorts: List<MidiPort> = emptyList(),
     val permissionState: PermissionState = PermissionState.UNKNOWN,
+    // Phase 2: real device stats (null = not yet queried)
+    val sampleCount: Int? = null,
+    val storageUsedBytes: Long? = null,
+    val storageTotalBytes: Long? = null,
+    val firmwareVersion: String? = null,
 )
 
 /**
