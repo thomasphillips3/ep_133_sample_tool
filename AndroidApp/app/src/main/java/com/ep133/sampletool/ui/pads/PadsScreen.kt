@@ -51,7 +51,12 @@ import com.ep133.sampletool.domain.midi.MIDIRepository
 import com.ep133.sampletool.domain.model.EP133Pads
 import com.ep133.sampletool.domain.model.Pad
 import com.ep133.sampletool.domain.model.PadChannel
+import com.ep133.sampletool.domain.model.Scale
 import com.ep133.sampletool.ui.theme.TEColors
+import androidx.compose.foundation.border
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.onSizeChanged
 
 class PadsViewModel(private val midi: MIDIRepository) : ViewModel() {
 
@@ -89,10 +94,15 @@ class PadsViewModel(private val midi: MIDIRepository) : ViewModel() {
         _pressedIndices.value = emptySet()
     }
 
-    fun padDown(index: Int) {
+    // D-17: scale state delegated from MIDIRepository (single source of truth)
+    val selectedScale: StateFlow<Scale?> = midi.selectedScale
+    val selectedRootNote: StateFlow<String> = midi.selectedRootNote
+
+    /** Send noteOn with velocity (D-19). Default velocity is 100 for backward compatibility. */
+    fun padDown(index: Int, velocity: Int = 100) {
         val pad = EP133Pads.padsForChannel(_selectedChannel.value).getOrNull(index) ?: return
         _pressedIndices.value = _pressedIndices.value + index
-        midi.noteOn(pad.note, 100, pad.midiChannel)
+        midi.noteOn(pad.note, velocity.coerceIn(1, 127), pad.midiChannel)
     }
 
     fun padUp(index: Int) {
@@ -102,17 +112,36 @@ class PadsViewModel(private val midi: MIDIRepository) : ViewModel() {
     }
 }
 
+/**
+ * Compute the set of pitch classes (0-11) in the given scale starting at [rootNoteName].
+ * Returns empty set if root note is not recognized.
+ */
+fun computeInScaleSet(scale: Scale, rootNoteName: String): Set<Int> {
+    val rootIndex = com.ep133.sampletool.domain.model.EP133Scales.ROOT_NOTES.indexOf(rootNoteName)
+    if (rootIndex < 0) return emptySet()
+    return scale.intervals.map { (rootIndex + it) % 12 }.toSet()
+}
+
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun PadsScreen(viewModel: PadsViewModel) {
     val selectedChannel by viewModel.selectedChannel.collectAsState()
     val pressedIndices by viewModel.pressedIndices.collectAsState()
+    val selectedScale by viewModel.selectedScale.collectAsState()
+    val selectedRootNote by viewModel.selectedRootNote.collectAsState()
     val pads by remember(selectedChannel) {
         derivedStateOf { EP133Pads.padsForChannel(selectedChannel) }
     }
-    val orientation = LocalConfiguration.current.orientation
-    // 4 columns matches the physical EP-133 pad layout (4×3 grid)
     // 3 columns × 4 rows — matches physical EP-133 calculator-style pad layout
     val columns = 3
+
+    // Scale lock: compute set of in-scale pitch classes
+    val inScaleSet by remember(selectedScale, selectedRootNote) {
+        derivedStateOf {
+            val scale = selectedScale
+            if (scale == null) emptySet() else computeInScaleSet(scale, selectedRootNote)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -124,10 +153,61 @@ fun PadsScreen(viewModel: PadsViewModel) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Grid that fills ALL remaining space — no dead space
+        // Multi-touch grid using grid-level pointerInteropFilter (D-18, D-20, RESEARCH.md Pattern 5)
         val rows = pads.chunked(columns)
+        val rowCount = rows.size
+        var gridWidthPx by remember { mutableStateOf(0f) }
+        var gridHeightPx by remember { mutableStateOf(0f) }
+        val pointerToPad = remember { mutableMapOf<Int, Int>() }
+
         Column(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .onSizeChanged { size ->
+                    gridWidthPx = size.width.toFloat()
+                    gridHeightPx = size.height.toFloat()
+                }
+                .pointerInteropFilter { event ->
+                    fun coordToIndex(x: Float, y: Float): Int? {
+                        if (gridWidthPx <= 0f || gridHeightPx <= 0f) return null
+                        val col = (x / (gridWidthPx / columns)).toInt().coerceIn(0, columns - 1)
+                        val row = (y / (gridHeightPx / rowCount)).toInt().coerceIn(0, rowCount - 1)
+                        val idx = row * columns + col
+                        return idx.takeIf { it < pads.size }
+                    }
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            val idx = coordToIndex(event.x, event.y)
+                                ?: return@pointerInteropFilter false
+                            val vel = (event.pressure.coerceIn(0f, 1f) * 127).toInt().coerceAtLeast(1)
+                            pointerToPad[event.getPointerId(0)] = idx
+                            viewModel.padDown(idx, vel)
+                            true
+                        }
+                        MotionEvent.ACTION_POINTER_DOWN -> {
+                            val ptrIdx = event.actionIndex
+                            val idx = coordToIndex(event.getX(ptrIdx), event.getY(ptrIdx))
+                                ?: return@pointerInteropFilter false
+                            val vel = (event.getPressure(ptrIdx).coerceIn(0f, 1f) * 127).toInt().coerceAtLeast(1)
+                            pointerToPad[event.getPointerId(ptrIdx)] = idx
+                            viewModel.padDown(idx, vel)
+                            true
+                        }
+                        MotionEvent.ACTION_POINTER_UP -> {
+                            val ptrIdx = event.actionIndex
+                            val padIdx = pointerToPad.remove(event.getPointerId(ptrIdx))
+                                ?: return@pointerInteropFilter false
+                            viewModel.padUp(padIdx)
+                            true
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            pointerToPad.forEach { (_, padIdx) -> viewModel.padUp(padIdx) }
+                            pointerToPad.clear()
+                            true
+                        }
+                        else -> false
+                    }
+                },
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             rows.forEachIndexed { rowIdx, rowPads ->
@@ -139,11 +219,12 @@ fun PadsScreen(viewModel: PadsViewModel) {
                 ) {
                     rowPads.forEachIndexed { colIdx, pad ->
                         val index = rowIdx * columns + colIdx
+                        val isInScale = inScaleSet.isEmpty() || (pad.note % 12) in inScaleSet
                         PadCell(
                             pad = pad,
                             isPressed = index in pressedIndices,
-                            onDown = { viewModel.padDown(index) },
-                            onUp = { viewModel.padUp(index) },
+                            isInScale = isInScale,
+                            scaleLockActive = inScaleSet.isNotEmpty(),
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight(),
@@ -187,17 +268,14 @@ private fun ChannelIndicator(selected: PadChannel) {
     }
 }
 
-@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun PadCell(
     pad: Pad,
     isPressed: Boolean,
-    onDown: () -> Unit,
-    onUp: () -> Unit,
+    isInScale: Boolean = true,
+    scaleLockActive: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val haptic = LocalHapticFeedback.current
-
     val shadowElevation by animateDpAsState(
         targetValue = if (isPressed) 0.dp else 6.dp,
         animationSpec = tween(durationMillis = 60),
@@ -226,6 +304,13 @@ private fun PadCell(
         label = "glowAlpha",
     )
 
+    // Scale lock border: in-scale pads get a teal border when a scale is active
+    val scaleBorderModifier = if (scaleLockActive && isInScale) {
+        Modifier.border(1.5.dp, TEColors.Teal, RoundedCornerShape(8.dp))
+    } else {
+        Modifier
+    }
+
     Box(
         modifier = modifier
             .shadow(
@@ -233,6 +318,7 @@ private fun PadCell(
                 shape = RoundedCornerShape(8.dp),
             )
             .background(backgroundColor, RoundedCornerShape(8.dp))
+            .then(scaleBorderModifier)
             .drawBehind {
                 // Rubber sheen
                 drawRect(brush = sheenBrush)
@@ -248,20 +334,6 @@ private fun PadCell(
                             radius = size.width * 0.7f,
                         ),
                     )
-                }
-            }
-            .pointerInteropFilter { event ->
-                when (event.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onDown()
-                        true
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        onUp()
-                        true
-                    }
-                    else -> false
                 }
             }
             .padding(10.dp),
