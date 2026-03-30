@@ -6,12 +6,14 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.UsbManager
 import android.media.midi.MidiManager
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowCompat
 import com.ep133.sampletool.domain.midi.ChordPlayer
 import com.ep133.sampletool.domain.midi.MIDIRepository
@@ -65,6 +67,18 @@ class MainActivity : ComponentActivity() {
         val soundsViewModel = SoundsViewModel(midiRepo)
         val chordsViewModel = ChordsViewModel(chordPlayer)
         val deviceViewModel = DeviceViewModel(midiRepo)
+
+        // SAF launchers for backup/restore — MUST be registered before setContent (Activity lifecycle)
+        val backupLauncher = registerForActivityResult(
+            ActivityResultContracts.CreateDocument("application/octet-stream"),
+        ) { uri: Uri? -> uri?.let { deviceViewModel.onBackupUriSelected(it, this) } }
+
+        val restoreLauncher = registerForActivityResult(
+            ActivityResultContracts.OpenDocument(),
+        ) { uri: Uri? -> uri?.let { deviceViewModel.onRestoreUriSelected(it, this) } }
+
+        deviceViewModel.onRequestBackup = { name -> backupLauncher.launch(name) }
+        deviceViewModel.onRequestRestore = { restoreLauncher.launch(arrayOf("*/*")) }
 
         setContent {
             val deviceState by midiRepo.deviceState.collectAsState()

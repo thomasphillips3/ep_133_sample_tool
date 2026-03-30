@@ -61,29 +61,151 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.ep133.sampletool.domain.midi.BackupManager
+import com.ep133.sampletool.domain.midi.BackupProgress
 import com.ep133.sampletool.domain.midi.MIDIRepository
+import com.ep133.sampletool.domain.midi.RestoreProgress
 import com.ep133.sampletool.domain.model.DeviceState
 import com.ep133.sampletool.domain.model.EP133Scales
 import com.ep133.sampletool.domain.model.PadChannel
 import com.ep133.sampletool.domain.model.PermissionState
 import com.ep133.sampletool.domain.model.Scale
 import com.ep133.sampletool.ui.theme.TEColors
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class DeviceViewModel(private val midi: MIDIRepository) : ViewModel() {
 
     val deviceState: StateFlow<DeviceState> = midi.deviceState
 
+    // D-16: channel shared from MIDIRepository
+    val channelFlow: StateFlow<Int> = midi.channelFlow
+
     private val _selectedChannel = MutableStateFlow(PadChannel.A)
     val selectedChannel: StateFlow<PadChannel> = _selectedChannel.asStateFlow()
 
-    private val _selectedScale = MutableStateFlow(EP133Scales.ALL.first())
-    val selectedScale: StateFlow<Scale> = _selectedScale.asStateFlow()
+    // D-17: scale state delegated to MIDIRepository (single source of truth)
+    val selectedScale: StateFlow<Scale?> = midi.selectedScale
+    val selectedRootNote: StateFlow<String> = midi.selectedRootNote
 
-    private val _selectedRootNote = MutableStateFlow("C")
-    val selectedRootNote: StateFlow<String> = _selectedRootNote.asStateFlow()
+    // ── Backup/Restore state ──
+    private val _isBackupInProgress = MutableStateFlow(false)
+    val isBackupInProgress: StateFlow<Boolean> = _isBackupInProgress.asStateFlow()
+
+    private val _isRestoreInProgress = MutableStateFlow(false)
+    val isRestoreInProgress: StateFlow<Boolean> = _isRestoreInProgress.asStateFlow()
+
+    private val _backupProgress = MutableStateFlow(0f)
+    val backupProgress: StateFlow<Float> = _backupProgress.asStateFlow()
+
+    private val _restoreProgress = MutableStateFlow(0f)
+    val restoreProgress: StateFlow<Float> = _restoreProgress.asStateFlow()
+
+    private val _snackbarMessage = MutableStateFlow<String?>(null)
+    val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
+
+    private var _pendingRestoreBytes: ByteArray? = null
+    private val _showRestoreConfirm = MutableStateFlow(false)
+    val showRestoreConfirm: StateFlow<Boolean> = _showRestoreConfirm.asStateFlow()
+
+    // SAF callbacks — set by MainActivity.onCreate() (cannot register ActivityResult inside ViewModel)
+    var onRequestBackup: ((suggestedName: String) -> Unit)? = null
+    var onRequestRestore: (() -> Unit)? = null
+
+    fun triggerBackup() {
+        if (_isBackupInProgress.value || _isRestoreInProgress.value) return
+        val name = BackupManager(midi).suggestedBackupFilename()
+        onRequestBackup?.invoke(name)
+    }
+
+    fun triggerRestore() {
+        if (_isBackupInProgress.value || _isRestoreInProgress.value) return
+        onRequestRestore?.invoke()
+    }
+
+    fun onBackupUriSelected(uri: android.net.Uri, context: android.content.Context) {
+        viewModelScope.launch {
+            _isBackupInProgress.value = true
+            _backupProgress.value = 0f
+            val backupManager = BackupManager(midi)
+            backupManager.createBackup(deviceId = 0).collect { progress ->
+                when (progress) {
+                    is BackupProgress.Progress -> {
+                        if (progress.total > 0) {
+                            _backupProgress.value = progress.current.toFloat() / progress.total
+                        }
+                    }
+                    is BackupProgress.Done -> {
+                        withContext(Dispatchers.IO) {
+                            context.contentResolver.openOutputStream(uri)?.use { out ->
+                                out.write(progress.pakBytes)
+                            }
+                        }
+                        _isBackupInProgress.value = false
+                        _backupProgress.value = 0f
+                        _snackbarMessage.value = "Backup complete"
+                    }
+                    is BackupProgress.Error -> {
+                        _isBackupInProgress.value = false
+                        _backupProgress.value = 0f
+                        _snackbarMessage.value = "Backup failed: ${progress.message}"
+                    }
+                }
+            }
+        }
+    }
+
+    fun onRestoreUriSelected(uri: android.net.Uri, context: android.content.Context) {
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                context.contentResolver.openInputStream(uri)?.readBytes()
+            } ?: return@launch
+            _pendingRestoreBytes = bytes
+            _showRestoreConfirm.value = true
+        }
+    }
+
+    fun confirmRestore() {
+        val bytes = _pendingRestoreBytes ?: return
+        _showRestoreConfirm.value = false
+        viewModelScope.launch {
+            _isRestoreInProgress.value = true
+            _restoreProgress.value = 0f
+            BackupManager(midi).restore(bytes, deviceId = 0).collect { progress ->
+                when (progress) {
+                    is RestoreProgress.Progress -> {
+                        if (progress.total > 0) {
+                            _restoreProgress.value = progress.current.toFloat() / progress.total
+                        }
+                    }
+                    is RestoreProgress.Done -> {
+                        _isRestoreInProgress.value = false
+                        _restoreProgress.value = 0f
+                        _snackbarMessage.value = "Restore complete. Your EP-133 will restart."
+                    }
+                    is RestoreProgress.Error -> {
+                        _isRestoreInProgress.value = false
+                        _restoreProgress.value = 0f
+                        _snackbarMessage.value = "Restore failed: ${progress.message}"
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelRestore() {
+        _showRestoreConfirm.value = false
+        _pendingRestoreBytes = null
+    }
+
+    fun dismissSnackbar() {
+        _snackbarMessage.value = null
+    }
 
     fun selectChannel(channel: PadChannel) {
         _selectedChannel.value = channel
@@ -91,12 +213,12 @@ class DeviceViewModel(private val midi: MIDIRepository) : ViewModel() {
         midi.setChannel(0)
     }
 
-    fun selectScale(scale: Scale) {
-        _selectedScale.value = scale
+    fun selectScale(scale: Scale?) {
+        midi.setScale(scale)
     }
 
     fun selectRootNote(note: String) {
-        _selectedRootNote.value = note
+        midi.setRootNote(note)
     }
 
     fun refreshDevices() {
@@ -113,50 +235,97 @@ fun DeviceScreen(
     val selectedChannel by viewModel.selectedChannel.collectAsState()
     val selectedScale by viewModel.selectedScale.collectAsState()
     val selectedRootNote by viewModel.selectedRootNote.collectAsState()
+    val isBackupInProgress by viewModel.isBackupInProgress.collectAsState()
+    val isRestoreInProgress by viewModel.isRestoreInProgress.collectAsState()
+    val backupProgress by viewModel.backupProgress.collectAsState()
+    val restoreProgress by viewModel.restoreProgress.collectAsState()
+    val snackbarMessage by viewModel.snackbarMessage.collectAsState()
+    val showRestoreConfirm by viewModel.showRestoreConfirm.collectAsState()
     var showSampleManager by remember { mutableStateOf(false) }
+
+    val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
+
+    // Show snackbar when message appears
+    androidx.compose.runtime.LaunchedEffect(snackbarMessage) {
+        snackbarMessage?.let { msg ->
+            snackbarHostState.showSnackbar(msg)
+            viewModel.dismissSnackbar()
+        }
+    }
 
     if (showSampleManager) {
         SampleManagerPanel(onDismiss = { showSampleManager = false })
         return
     }
 
+    // Restore confirmation dialog
+    if (showRestoreConfirm) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { viewModel.cancelRestore() },
+            title = { Text("Restore EP-133?") },
+            text = { Text("This will overwrite all content on your EP-133. This cannot be undone.") },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { viewModel.confirmRestore() }) {
+                    Text("Restore")
+                }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { viewModel.cancelRestore() }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
     val context = LocalContext.current
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        if (!deviceState.connected) {
-            DeviceConnectionState(
-                permissionState = deviceState.permissionState,
-                onGrantPermission = { viewModel.refreshDevices() },
-                onOpenSettings = {
-                    val intent = Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.fromParts("package", context.packageName, null),
-                    )
-                    context.startActivity(intent)
-                },
+    androidx.compose.material3.Scaffold(
+        snackbarHost = { androidx.compose.material3.SnackbarHost(snackbarHostState) },
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(innerPadding)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            if (!deviceState.connected) {
+                DeviceConnectionState(
+                    permissionState = deviceState.permissionState,
+                    onGrantPermission = { viewModel.refreshDevices() },
+                    onOpenSettings = {
+                        val intent = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null),
+                        )
+                        context.startActivity(intent)
+                    },
+                )
+            }
+            DeviceCard(deviceState)
+            StatsRow(deviceState)
+            ChannelSelector(
+                selected = selectedChannel,
+                onSelect = viewModel::selectChannel,
             )
+            ScaleModeSelector(
+                selectedScale = selectedScale,
+                onScaleSelect = viewModel::selectScale,
+                selectedRoot = selectedRootNote,
+                onRootSelect = viewModel::selectRootNote,
+            )
+            BackupRestoreSection(
+                isBackupInProgress = isBackupInProgress,
+                isRestoreInProgress = isRestoreInProgress,
+                backupProgress = backupProgress,
+                restoreProgress = restoreProgress,
+                onBackup = { viewModel.triggerBackup() },
+                onRestore = { viewModel.triggerRestore() },
+            )
+            RestoreFactoryButton(onOpen = { showSampleManager = true })
+            FormatDeviceButton(onOpen = { showSampleManager = true })
         }
-        DeviceCard(deviceState)
-        StatsRow(deviceState)
-        ChannelSelector(
-            selected = selectedChannel,
-            onSelect = viewModel::selectChannel,
-        )
-        ScaleModeSelector(
-            selectedScale = selectedScale,
-            onScaleSelect = viewModel::selectScale,
-            selectedRoot = selectedRootNote,
-            onRootSelect = viewModel::selectRootNote,
-        )
-        ActionButtons(onOpenManager = { showSampleManager = true })
-        RestoreFactoryButton(onOpen = { showSampleManager = true })
-        FormatDeviceButton(onOpen = { showSampleManager = true })
     }
 }
 
@@ -288,20 +457,41 @@ private fun DeviceCard(state: DeviceState) {
 
 @Composable
 private fun StatsRow(state: DeviceState) {
+    val samplesValue = when {
+        !state.connected -> "--"
+        state.sampleCount != null -> state.sampleCount.toString()
+        else -> null  // null = loading
+    }
+    val storageValue = when {
+        !state.connected -> "--"
+        state.storageUsedBytes != null && state.storageTotalBytes != null -> {
+            val usedMb = state.storageUsedBytes / 1_048_576
+            val totalMb = state.storageTotalBytes / 1_048_576
+            "${usedMb}MB / ${totalMb}MB"
+        }
+        else -> null  // null = loading
+    }
+    val firmwareValue = when {
+        !state.connected -> "--"
+        state.firmwareVersion != null -> state.firmwareVersion
+        else -> null  // null = loading
+    }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        StatCard("SAMPLES", if (state.connected) "128" else "--", Modifier.weight(1f))
-        StatCard("PROJECTS", if (state.connected) "8" else "--", Modifier.weight(1f))
-        StatCard("FIRMWARE", if (state.connected) "v1.3.2" else "--", Modifier.weight(1f))
+        StatCard("SAMPLES", samplesValue, isLoading = state.connected && samplesValue == null, Modifier.weight(1f))
+        StatCard("STORAGE", storageValue, isLoading = state.connected && storageValue == null, Modifier.weight(1f))
+        StatCard("FIRMWARE", firmwareValue, isLoading = state.connected && firmwareValue == null, Modifier.weight(1f))
     }
 }
 
 @Composable
 private fun StatCard(
     label: String,
-    value: String,
+    value: String?,
+    isLoading: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     OutlinedCard(modifier = modifier) {
@@ -311,11 +501,15 @@ private fun StatCard(
                 .padding(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text(
-                text = value,
-                style = MaterialTheme.typography.displaySmall,
-                textAlign = TextAlign.Center,
-            )
+            if (isLoading) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+            } else {
+                Text(
+                    text = value ?: "--",
+                    style = MaterialTheme.typography.displaySmall,
+                    textAlign = TextAlign.Center,
+                )
+            }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = label,
@@ -363,8 +557,8 @@ private fun ChannelSelector(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ScaleModeSelector(
-    selectedScale: Scale,
-    onScaleSelect: (Scale) -> Unit,
+    selectedScale: Scale?,
+    onScaleSelect: (Scale?) -> Unit,
     selectedRoot: String,
     onRootSelect: (String) -> Unit,
 ) {
@@ -382,11 +576,15 @@ private fun ScaleModeSelector(
         ) {
             ScaleDropdown(
                 label = "Scale",
-                selectedText = selectedScale.name,
-                options = EP133Scales.ALL.map { it.name },
+                selectedText = selectedScale?.name ?: "None",
+                options = listOf("None") + EP133Scales.ALL.map { it.name },
                 onSelect = { name ->
-                    EP133Scales.ALL.firstOrNull { it.name == name }
-                        ?.let(onScaleSelect)
+                    if (name == "None") {
+                        onScaleSelect(null)
+                    } else {
+                        EP133Scales.ALL.firstOrNull { it.name == name }
+                            ?.let(onScaleSelect)
+                    }
                 },
                 modifier = Modifier.weight(2f),
             )
@@ -444,6 +642,73 @@ private fun ScaleDropdown(
                     contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun BackupRestoreSection(
+    isBackupInProgress: Boolean,
+    isRestoreInProgress: Boolean,
+    backupProgress: Float,
+    restoreProgress: Float,
+    onBackup: () -> Unit,
+    onRestore: () -> Unit,
+) {
+    val busy = isBackupInProgress || isRestoreInProgress
+    Column {
+        Text(
+            text = "BACKUP & RESTORE",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Button(
+                onClick = onBackup,
+                enabled = !busy,
+                modifier = Modifier.weight(1f),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.SaveAlt,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Backup")
+            }
+            Button(
+                onClick = onRestore,
+                enabled = !busy,
+                modifier = Modifier.weight(1f),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Restore,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Restore")
+            }
+        }
+        if (isBackupInProgress) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("Backup in progress…", style = MaterialTheme.typography.bodySmall)
+            LinearProgressIndicator(
+                progress = { backupProgress },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (isRestoreInProgress) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("Restore in progress…", style = MaterialTheme.typography.bodySmall)
+            LinearProgressIndicator(
+                progress = { restoreProgress },
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }
