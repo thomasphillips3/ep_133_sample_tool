@@ -3,8 +3,8 @@ phase: 02-android-device-management
 plan: 02
 type: execute
 wave_count: 4
-total_tasks: 17
-total_files: 22
+total_tasks: 10
+total_files: 21
 wave: 1
 depends_on: []
 files_modified:
@@ -259,6 +259,7 @@ Create two new test stubs and implement the three existing @Ignore stubs from Ph
 - `queryDeviceStats_populatesFirmwareVersion` — simulate a GREET SysEx response via `TestMIDIRepository`; assert `DeviceState.firmwareVersion == "1.3.2"`
 - `queryDeviceStats_populatesStorageFields` — simulate FILE_METADATA response; assert `storageUsedBytes` and `storageTotalBytes` populated
 - `statsNull_beforeQuery` — fresh `DeviceState()` has all stats fields null
+- `queryDeviceStats_populatesSampleCount` — simulate FILE_LIST response for "/sounds" returning 3 entries; assert `DeviceState.sampleCount == 3`
 
 Import `kotlinx.coroutines.test.runTest`, `kotlinx.coroutines.test.advanceTimeBy`.
 
@@ -556,6 +557,7 @@ Add `private val _channel = MutableStateFlow(0)` and expose `val channelFlow: St
     - queryDeviceStats() sends GREET SysEx and returns null after 5 seconds if no response
     - queryDeviceStats() populates firmwareVersion from GREET response sw_version field
     - queryDeviceStats() populates storageUsedBytes/storageTotalBytes from FILE_METADATA response on "/sounds"
+    - queryDeviceStats() populates sampleCount by issuing FILE_LIST on "/sounds" and counting returned entries
     - DeviceState emitted via deviceState StateFlow reflects updated stats after queryDeviceStats() completes
   </behavior>
   <action>
@@ -584,6 +586,7 @@ Add fields:
 ```kotlin
 private var pendingGreetDeferred: CompletableDeferred<Map<String, String>>? = null
 private var pendingMetadataDeferred: CompletableDeferred<Map<String, String>>? = null
+private var pendingFileListCountDeferred: CompletableDeferred<Int>? = null
 private var currentDeviceId: Int = 0
 ```
 
@@ -615,6 +618,15 @@ suspend fun queryDeviceStats(): Boolean {
             storageTotalBytes = total,
         )
     }
+
+    // Step 3: FILE_LIST on /sounds (count samples)
+    val fileListDeferred = CompletableDeferred<Int>()
+    pendingFileListCountDeferred = fileListDeferred
+    val listFrame = SysExProtocol.buildFileListFrame(currentDeviceId, "/sounds", requestId = 3)
+    midiManager.sendMidi(portId, listFrame)
+    val sampleCount = withTimeoutOrNull(5_000) { fileListDeferred.await() } ?: 0
+    _deviceState.value = _deviceState.value.copy(sampleCount = sampleCount)
+
     return true
 }
 ```
@@ -652,9 +664,29 @@ private fun dispatchFileResponse(fileCmd: Int, payload: ByteArray) {
             pendingMetadataDeferred?.complete(parsed)
             pendingMetadataDeferred = null
         }
-        // FILE_LIST and FILE_GET responses are routed via BackupManager in Wave 2
+        SysExProtocol.TE_SYSEX_FILE_LIST -> {
+            // Each FILE_LIST response entry increments the running count.
+            // A STATUS_OK (not STATUS_SPECIFIC_SUCCESS_START) signals the last entry.
+            // For simplicity in Phase 2: accumulate entry count in a local counter,
+            // complete the deferred when the final entry (status == STATUS_OK) arrives.
+            // Increment by 1 per response frame received. When status byte == STATUS_OK,
+            // complete pendingFileListCountDeferred with the total count.
+            // BackupManager handles full entry parsing (path + nodeId) in Wave 2.
+            val status = payload.getOrNull(0)?.toInt() ?: return
+            if (status == SysExProtocol.STATUS_OK || status == SysExProtocol.STATUS_SPECIFIC_SUCCESS_START) {
+                fileListEntryCount++
+            }
+            if (status == SysExProtocol.STATUS_OK) {
+                pendingFileListCountDeferred?.complete(fileListEntryCount)
+                pendingFileListCountDeferred = null
+                fileListEntryCount = 0
+            }
+        }
+        // FILE_GET responses are routed via BackupManager in Wave 2
     }
 }
+
+private var fileListEntryCount: Int = 0
 ```
 
 **4. Auto-trigger `queryDeviceStats()` on device connect** (per D-13):
@@ -674,7 +706,7 @@ Add `fun close()` to `MIDIRepository` to cancel `repositoryScope` — call from 
   <verify>
     <automated>cd /Users/thomasphillips/workspace/ep_133_sample_tool/AndroidApp && ./gradlew :app:testDebugUnitTest --tests "*.MIDIRepositoryStatsTest" 2>&1 | tail -20</automated>
   </verify>
-  <done>MIDIRepositoryStatsTest passes (remove @Ignore where possible). DeviceState has firmware/storage/sampleCount fields. queryDeviceStats() times out cleanly after 5s. Full unit suite still green.</done>
+  <done>MIDIRepositoryStatsTest passes (remove @Ignore where possible). DeviceState has firmware/storage/sampleCount fields. queryDeviceStats() populates all three stat groups including sampleCount from FILE_LIST. Timeout after 5s returns false cleanly. Full unit suite still green.</done>
 </task>
 
 </tasks>
@@ -697,7 +729,7 @@ Add `fun close()` to `MIDIRepository` to cancel `repositoryScope` — call from 
     - The ZIP archive contains at least one .wav entry and one .json metadata entry
     - buildFilePutFrame produces frames with FILE_PUT command byte (2) in the correct position
     - BackupManager.restore() with a valid PAK byte array sends FILE_PUT SysEx frames via MIDIRepository
-    - BackupManager exposes progress as Flow<BackupProgress>
+    - BackupProgress is a sealed class with Progress(current, total), Done(pakBytes), and Error(message) subtypes
   </behavior>
   <action>
 Create `BackupManager.kt` in `domain/midi/`. This class orchestrates the multi-round-trip TE file-transfer protocol to create and restore `.pak` backup archives.
@@ -713,34 +745,36 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-data class BackupProgress(
-    val stage: Stage,
-    val filesCompleted: Int = 0,
-    val totalFiles: Int = 0,
-    val currentFile: String = "",
-) {
-    enum class Stage { LISTING, DOWNLOADING, PACKAGING, UPLOADING, DONE, FAILED }
+sealed class BackupProgress {
+    data class Progress(val current: Int, val total: Int) : BackupProgress()
+    data class Done(val pakBytes: ByteArray) : BackupProgress()
+    data class Error(val message: String) : BackupProgress()
+}
+
+sealed class RestoreProgress {
+    data class Progress(val current: Int, val total: Int) : RestoreProgress()
+    object Done : RestoreProgress()
+    data class Error(val message: String) : RestoreProgress()
 }
 
 class BackupManager(private val midi: MIDIRepository) {
 ```
 
 **Backup flow (`createBackup(deviceId: Int): Flow<BackupProgress>`):**
-1. Emit `LISTING` stage
-2. Send `FILE_LIST` for `/sounds` path; collect `FileListEntry` results (filename, nodeId) from `MIDIRepository.fileListFlow` (a `MutableSharedFlow` added to MIDIRepository for file protocol responses)
-3. For each file: send `FILE_GET`; collect chunks until `STATUS_OK` (not `STATUS_SPECIFIC_SUCCESS_START`); emit `DOWNLOADING` progress per file
+1. Emit `BackupProgress.Progress(0, 0)` (LISTING stage)
+2. Send `FILE_LIST` for `/sounds` path; collect `FileListEntry` results (filename, nodeId) from `MIDIRepository.fileListEntries` (a `MutableSharedFlow` added to MIDIRepository for file protocol responses)
+3. For each file: send `FILE_GET`; collect chunks until `STATUS_OK` (not `STATUS_SPECIFIC_SUCCESS_START`); emit `BackupProgress.Progress(filesCompleted, totalFiles)` per file
 4. Assemble all downloaded files into a ZIP archive using `ZipOutputStream`:
    - Each WAV file → `ZipEntry("{filename}.wav")` with downloaded bytes
    - Project JSON metadata → `ZipEntry("metadata.json")` with device info
-5. Emit `PACKAGING`, return completed ZIP as `ByteArray`
-6. Emit `DONE`
+5. Emit `BackupProgress.Done(pakBytes)` with the completed ZIP as `ByteArray`
 
-**Restore flow (`restore(pakBytes: ByteArray, deviceId: Int): Flow<BackupProgress>`):**
-1. Validate ZIP magic bytes `[0x50, 0x4B, 0x03, 0x04]` — throw `IllegalArgumentException` if invalid
+**Restore flow (`restore(pakBytes: ByteArray, deviceId: Int): Flow<RestoreProgress>`):**
+1. Validate ZIP magic bytes `[0x50, 0x4B, 0x03, 0x04]` — emit `RestoreProgress.Error("Invalid PAK file")` if invalid
 2. Parse ZIP entries using `ZipInputStream(pakBytes.inputStream())`
 3. For each entry: send `FILE_PUT` frame(s) with the entry's data and path
-4. Emit `UPLOADING` progress per file
-5. Emit `DONE`
+4. Emit `RestoreProgress.Progress(current, total)` per file
+5. Emit `RestoreProgress.Done`
 
 **Add supporting flow to MIDIRepository** (needed by BackupManager):
 ```kotlin
@@ -767,7 +801,7 @@ Note: The actual round-trip SysEx exchange (waiting for each FILE_GET response c
   <verify>
     <automated>cd /Users/thomasphillips/workspace/ep_133_sample_tool/AndroidApp && ./gradlew :app:testDebugUnitTest --tests "*.BackupRestoreTest" 2>&1 | tail -20</automated>
   </verify>
-  <done>BackupRestoreTest passes (remove @Ignore). ZIP magic bytes confirmed. FILE_PUT frame structure correct. Restore validates PAK before sending.</done>
+  <done>BackupRestoreTest passes (remove @Ignore). ZIP magic bytes confirmed. FILE_PUT frame structure correct. Restore validates PAK before sending. BackupProgress.Done carries pakBytes.</done>
 </task>
 
 <task type="auto" tdd="false">
@@ -791,6 +825,17 @@ class DeviceViewModel(private val midi: MIDIRepository) : ViewModel() {
     val isBackupInProgress: StateFlow<Boolean> = _isBackupInProgress.asStateFlow()
     private val _isRestoreInProgress = MutableStateFlow(false)
     val isRestoreInProgress: StateFlow<Boolean> = _isRestoreInProgress.asStateFlow()
+    private val _backupProgress = MutableStateFlow(0f)
+    val backupProgress: StateFlow<Float> = _backupProgress.asStateFlow()
+    private val _restoreProgress = MutableStateFlow(0f)
+    val restoreProgress: StateFlow<Float> = _restoreProgress.asStateFlow()
+    private val _snackbarMessage = MutableStateFlow<String?>(null)
+    val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
+
+    // Restore confirmation state
+    private var _pendingRestoreBytes: ByteArray? = null
+    private val _showRestoreConfirm = MutableStateFlow(false)
+    val showRestoreConfirm: StateFlow<Boolean> = _showRestoreConfirm.asStateFlow()
 
     // SAF callbacks — set by MainActivity.onCreate() (per RESEARCH.md Pitfall 2)
     var onRequestBackup: ((suggestedName: String) -> Unit)? = null
@@ -808,25 +853,74 @@ class DeviceViewModel(private val midi: MIDIRepository) : ViewModel() {
     }
 
     fun onBackupUriSelected(uri: android.net.Uri, context: android.content.Context) {
-        _isBackupInProgress.value = true
         viewModelScope.launch {
-            try {
-                val backupManager = BackupManager(midi)
-                backupManager.createBackup(currentDeviceId = 0).collect { progress ->
-                    if (progress.stage == BackupProgress.Stage.DONE) {
-                        // write to SAF URI
-                        // _snackbarMessage.value = "Backup complete"
+            _isBackupInProgress.value = true
+            val backupManager = BackupManager(midi)
+            backupManager.createBackup(currentDeviceId = 0).collect { progress ->
+                when (progress) {
+                    is BackupProgress.Progress -> {
+                        if (progress.total > 0) {
+                            _backupProgress.value = progress.current.toFloat() / progress.total
+                        }
+                    }
+                    is BackupProgress.Done -> {
+                        withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            context.contentResolver.openOutputStream(uri)?.use { out ->
+                                out.write(progress.pakBytes)
+                            }
+                        }
+                        _isBackupInProgress.value = false
+                        _snackbarMessage.value = "Backup complete"
+                    }
+                    is BackupProgress.Error -> {
+                        _isBackupInProgress.value = false
+                        _snackbarMessage.value = "Backup failed: ${progress.message}"
                     }
                 }
-            } finally {
-                _isBackupInProgress.value = false
             }
         }
     }
 
     fun onRestoreUriSelected(uri: android.net.Uri, context: android.content.Context) {
-        // Restore logic: read bytes, set _pendingRestoreBytes, show confirmation dialog
+        viewModelScope.launch {
+            val bytes = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                context.contentResolver.openInputStream(uri)?.readBytes()
+            } ?: return@launch
+            _pendingRestoreBytes = bytes
+            _showRestoreConfirm.value = true
+        }
     }
+
+    fun confirmRestore() {
+        val bytes = _pendingRestoreBytes ?: return
+        _showRestoreConfirm.value = false
+        viewModelScope.launch {
+            _isRestoreInProgress.value = true
+            BackupManager(midi).restore(bytes, currentDeviceId = 0).collect { progress ->
+                when (progress) {
+                    is RestoreProgress.Progress -> {
+                        if (progress.total > 0) {
+                            _restoreProgress.value = progress.current.toFloat() / progress.total
+                        }
+                    }
+                    is RestoreProgress.Done -> {
+                        _isRestoreInProgress.value = false
+                        _snackbarMessage.value = "Restore complete. Your EP-133 will restart."
+                    }
+                    is RestoreProgress.Error -> {
+                        _isRestoreInProgress.value = false
+                        _snackbarMessage.value = "Restore failed: ${progress.message}"
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelRestore() {
+        _showRestoreConfirm.value = false
+        _pendingRestoreBytes = null
+    }
+}
 ```
 
 **2. Update `StatsRow` composable** (per D-14) — remove hardcoded values:
@@ -841,16 +935,16 @@ Add two `Button` composables in a `Row`:
 - "Restore" button with `Icons.Filled.Restore` — `onClick = { viewModel.triggerRestore() }`, disabled when `isBackupInProgress || isRestoreInProgress`
 - Show `LinearProgressIndicator(Modifier.fillMaxWidth())` when either progress flag is true (per D-05, D-07)
 
-**4. Add `AlertDialog` for restore confirmation** (per D-06):
+**4. Add `AlertDialog` for restore confirmation** (per D-06). Observe `showRestoreConfirm` from the ViewModel — do NOT use local `remember` state for this, as the ViewModel controls the confirmation lifecycle:
 ```kotlin
-var showRestoreConfirm by remember { mutableStateOf(false) }
+val showRestoreConfirm by viewModel.showRestoreConfirm.collectAsState()
 if (showRestoreConfirm) {
     AlertDialog(
-        onDismissRequest = { showRestoreConfirm = false },
+        onDismissRequest = { viewModel.cancelRestore() },
         title = { Text("Restore EP-133?") },
         text = { Text("This will overwrite all content on your EP-133. This cannot be undone.") },
-        confirmButton = { TextButton(onClick = { viewModel.confirmRestore(); showRestoreConfirm = false }) { Text("Restore") } },
-        dismissButton = { TextButton(onClick = { showRestoreConfirm = false }) { Text("Cancel") } },
+        confirmButton = { TextButton(onClick = { viewModel.confirmRestore() }) { Text("Restore") } },
+        dismissButton = { TextButton(onClick = { viewModel.cancelRestore() }) { Text("Cancel") } },
     )
 }
 ```
@@ -867,7 +961,7 @@ val restoreLauncher = registerForActivityResult(
 ) { uri: Uri? -> uri?.let { deviceViewModel.onRestoreUriSelected(it, this) } }
 
 deviceViewModel.onRequestBackup = { name -> backupLauncher.launch(name) }
-deviceViewModel.onRequestRestore = { restoreLauncher.launch(null) }
+deviceViewModel.onRequestRestore = { restoreLauncher.launch(arrayOf("*/*")) }
 ```
 
 Add `midiRepo.close()` to `MainActivity.onDestroy()` to cancel `repositoryScope`.
@@ -877,7 +971,7 @@ Add required imports: `androidx.activity.result.contract.ActivityResultContracts
   <verify>
     <automated>cd /Users/thomasphillips/workspace/ep_133_sample_tool/AndroidApp && ./gradlew :app:assembleDebug 2>&1 | tail -30</automated>
   </verify>
-  <done>App builds clean. DeviceScreen shows `--` for disconnected stats and real values after stats query. Backup and Restore buttons visible. SAF launchers registered in MainActivity.onCreate().</done>
+  <done>App builds clean. DeviceScreen shows `--` for disconnected stats and real values after stats query. Backup and Restore buttons visible. SAF launchers registered in MainActivity.onCreate(). restoreLauncher.launch() passes arrayOf("*/*") (not null). Backup bytes written to SAF URI via onBackupUriSelected. confirmRestore() and cancelRestore() defined in DeviceViewModel.</done>
 </task>
 
 </tasks>
@@ -1014,7 +1108,10 @@ val inScaleSet by remember(selectedScale, selectedRootNote) {
 ```
 Pass `isInScale = inScaleSet.isEmpty() || (pad.note % 12) in inScaleSet` to each `PadCell`.
 
-In `PadCell`, add `isInScale: Boolean` parameter. When `isInScale` is true: normal styling. When false: add `border(1.dp, TEColors.Teal.copy(alpha = 0.0f))` — i.e., no border for out-of-scale. Wait — per D-29: in-scale pads get teal border; out-of-scale show normal. So: add `border(1.5.dp, TEColors.Teal)` when `isInScale && !inScaleSet.isEmpty()`.
+In `PadCell`, add `isInScale: Boolean` parameter. Apply border styling based on scale lock:
+- When `isInScale` is true AND `inScaleSet.isNotEmpty()` (a scale is actively selected): add `border(1.5.dp, TEColors.Teal)` modifier to indicate this pad is in the selected scale
+- When `isInScale` is false (pad is out of scale): normal styling, no extra border
+- When `inScaleSet.isEmpty()` (no scale selected): normal styling for all pads
 
 Add required imports: `android.view.MotionEvent`, `androidx.compose.ui.layout.onSizeChanged`, `androidx.compose.foundation.border`.
 
@@ -1023,7 +1120,7 @@ Add required imports: `android.view.MotionEvent`, `androidx.compose.ui.layout.on
   <verify>
     <automated>cd /Users/thomasphillips/workspace/ep_133_sample_tool/AndroidApp && ./gradlew :app:testDebugUnitTest --tests "*.PadsViewModelTest" --tests "*.ScaleLockTest" 2>&1 | tail -20</automated>
   </verify>
-  <done>PadsViewModelTest and ScaleLockTest pass (remove @Ignore). App builds clean. PadCell receives isInScale flag. In-scale pads show teal border. Multi-touch grid refactored.</done>
+  <done>PadsViewModelTest and ScaleLockTest pass (remove @Ignore). App builds clean. PadCell receives isInScale flag. In-scale pads show TEColors.Teal border (1.5.dp) when a scale is selected. Out-of-scale and no-scale-selected pads show normal styling. Multi-touch grid refactored.</done>
 </task>
 
 <task type="auto" tdd="true">
@@ -1138,12 +1235,13 @@ cd /Users/thomasphillips/workspace/ep_133_sample_tool/AndroidApp && ./gradlew :a
 Manual UAT checklist (requires physical EP-133):
 1. Connect EP-133 → DeviceScreen shows real firmware version (not "v1.3.2")
 2. DeviceScreen shows real storage stats (not "8")
-3. Tap "Backup" → SAF file picker opens with suggested `EP133-YYYY-MM-DD-HHmm.pak` name
-4. Tap "Restore" → file picker opens, select `.pak` file → confirmation dialog appears
-5. Two simultaneous finger taps on different pads → two distinct sounds play
-6. Select "C Major" scale → in-scale pads show teal border
-7. Tap sound row in Sounds screen → sound plays, stops after 500ms
-8. BeatsScreen Play → EP-133 hardware transport follows app BPM
+3. DeviceScreen shows real sample count (not "128")
+4. Tap "Backup" → SAF file picker opens with suggested `EP133-YYYY-MM-DD-HHmm.pak` name
+5. Tap "Restore" → file picker opens, select `.pak` file → confirmation dialog appears
+6. Two simultaneous finger taps on different pads → two distinct sounds play
+7. Select "C Major" scale → in-scale pads show teal border
+8. Tap sound row in Sounds screen → sound plays, stops after 500ms
+9. BeatsScreen Play → EP-133 hardware transport follows app BPM
 </verification>
 
 <success_criteria>
@@ -1153,12 +1251,17 @@ Manual UAT checklist (requires physical EP-133):
 - [ ] SysExProtocol.kt: TE manufacturer ID [0x00, 0x20, 0x76] confirmed in tests
 - [ ] MIDIRepository parseMidiInput handles SysEx fragments (0xF0..0xF7 accumulation)
 - [ ] DeviceState has sampleCount, storageUsedBytes, storageTotalBytes, firmwareVersion fields
+- [ ] queryDeviceStats() issues FILE_LIST step to populate sampleCount (not just GREET + FILE_METADATA)
 - [ ] queryDeviceStats() times out after 5s and returns false (not crash)
+- [ ] BackupManager uses sealed class BackupProgress with Done(pakBytes: ByteArray) subtype
 - [ ] BackupManager creates ZIP-format .pak files (validated by BackupRestoreTest)
+- [ ] onBackupUriSelected writes pakBytes from BackupProgress.Done to SAF URI via contentResolver.openOutputStream wrapped in withContext(Dispatchers.IO)
+- [ ] onRestoreUriSelected reads file bytes and sets _pendingRestoreBytes; confirmRestore() and cancelRestore() defined
+- [ ] restoreLauncher.launch(arrayOf("*/*")) — not null
 - [ ] DeviceScreen StatsRow shows null-guarded real values (-- when not queried)
 - [ ] Backup/Restore buttons on DeviceScreen; SAF launchers in MainActivity.onCreate()
 - [ ] padDown(index, velocity) signature added; multi-touch grid-level handler in PadsScreen
-- [ ] In-scale pads show TEColors.Teal border when scale selected
+- [ ] In-scale pads show TEColors.Teal border(1.5.dp) when scale selected; no border for out-of-scale or no-scale-selected
 - [ ] SoundsViewModel.previewSound() sends noteOn ch=9, noteOff after 500ms with job cancellation
 - [ ] SequencerEngine.play() sends 0xFA, stop() sends 0xFC, playLoop sends 6x 0xF8 per step
 - [ ] Full unit test suite green: `./gradlew :app:testDebugUnitTest`
