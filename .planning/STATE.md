@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to plan
-last_updated: "2026-03-29T04:25:43.907Z"
+status: Phase complete — ready for verification
+last_updated: "2026-03-30T08:54:50.261Z"
 progress:
   total_phases: 4
-  completed_phases: 1
-  total_plans: 1
-  completed_plans: 3
+  completed_phases: 2
+  total_plans: 2
+  completed_plans: 4
 ---
 
 # Project State
@@ -23,7 +23,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-28)
 
 **Core value:** A connected EP-133 user can do everything on their phone that they can do on their desktop — no laptop required.
-**Current focus:** Phase 01 — midi-foundation
+**Current focus:** Phase 02 — android-device-management
 
 ## Phases
 
@@ -36,8 +36,8 @@ See: .planning/PROJECT.md (updated 2026-03-28)
 
 ## Current Position
 
-Phase: 01 (midi-foundation) — AWAITING VERIFICATION (checkpoint:human-verify)
-Plan: Not started
+Phase: 02 (android-device-management) — EXECUTING
+Plan: 1 of 1
 **Active phase:** Phase 1: MIDI Foundation
 **Active plan:** 03 complete — Task 3-06 is checkpoint:human-verify (blocking)
 **Phase progress:** Phase 1 tasks done, verification pending
@@ -54,6 +54,10 @@ Plan: Not started
 - **MIDIRepository.currentPermissionState:** Cast via (midiManager as? MIDIManager) — pragmatic Phase 1; clean in Phase 2
 - **iOS ObservableObject:** iOS 16 target requires ObservableObject + @Published (not @Observable which needs iOS 17)
 - **MIDIDevice/MIDIDeviceList:** Top-level types in MIDIPort.swift (not nested in protocol)
+- [Phase 02-android-device-management]: SysEx accumulation uses ByteArrayOutputStream — avoids fixed-size caps for large FILE_GET responses
+- [Phase 02-android-device-management]: Scale and channel state live in MIDIRepository as single source of truth (not duplicated in ViewModels)
+- [Phase 02-android-device-management]: SAF launchers must be registered before setContent() in MainActivity — Activity lifecycle constraint
+- [Phase 02-android-device-management]: MIDI-dependent unit tests @Ignore — android.util.Log not available in JVM tests; validated via instrumented tests
 
 ## Notes
 

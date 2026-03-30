@@ -14,17 +14,17 @@
 
 ### Performance
 
-- [ ] **PERF-01**: User can trigger EP-133 sounds via touch pads with multi-touch and velocity sensitivity
-- [ ] **PERF-02**: User can preview a factory sound on the EP-133 by tapping it in the sounds browser before assigning it to a pad
-- [ ] **PERF-03**: User can program a 16-step beat sequence and play it synced to EP-133 hardware transport (start/stop/BPM)
-- [ ] **PERF-04**: Pads visually highlight in-scale vs out-of-scale notes based on the selected scale and root note (scale lock)
+- [x] **PERF-01**: User can trigger EP-133 sounds via touch pads with multi-touch and velocity sensitivity
+- [x] **PERF-02**: User can preview a factory sound on the EP-133 by tapping it in the sounds browser before assigning it to a pad
+- [x] **PERF-03**: User can program a 16-step beat sequence and play it synced to EP-133 hardware transport (start/stop/BPM)
+- [x] **PERF-04**: Pads visually highlight in-scale vs out-of-scale notes based on the selected scale and root note (scale lock)
 
 ### Device Management
 
-- [ ] **DEV-01**: User can view real-time device stats (sample count, storage used, firmware version) queried live from the EP-133 via SysEx
-- [ ] **DEV-02**: User can configure EP-133 MIDI channel and scale/root note from the Device screen
-- [ ] **DEV-03**: User can save a full EP-133 backup to a named file on phone storage
-- [ ] **DEV-04**: User can restore the EP-133 from a backup file stored on phone storage
+- [x] **DEV-01**: User can view real-time device stats (sample count, storage used, firmware version) queried live from the EP-133 via SysEx
+- [x] **DEV-02**: User can configure EP-133 MIDI channel and scale/root note from the Device screen
+- [x] **DEV-03**: User can save a full EP-133 backup to a named file on phone storage
+- [x] **DEV-04**: User can restore the EP-133 from a backup file stored on phone storage
 
 ### Projects
 
@@ -84,14 +84,14 @@ Updated after roadmap creation: 2026-03-28
 | CONN-02 | Phase 1 | Complete |
 | CONN-03 | Phase 1 | Complete |
 | CONN-04 | Phase 1 | Complete |
-| PERF-01 | Phase 2 | Pending |
-| PERF-02 | Phase 2 | Pending |
-| PERF-03 | Phase 2 | Pending |
-| PERF-04 | Phase 2 | Pending |
-| DEV-01 | Phase 2 | Pending |
-| DEV-02 | Phase 2 | Pending |
-| DEV-03 | Phase 2 | Pending |
-| DEV-04 | Phase 2 | Pending |
+| PERF-01 | Phase 2 | Complete |
+| PERF-02 | Phase 2 | Complete |
+| PERF-03 | Phase 2 | Complete |
+| PERF-04 | Phase 2 | Complete |
+| DEV-01 | Phase 2 | Complete |
+| DEV-02 | Phase 2 | Complete |
+| DEV-03 | Phase 2 | Complete |
+| DEV-04 | Phase 2 | Complete |
 | PROJ-01 | Phase 4 | Pending |
 | PROJ-02 | Phase 4 | Pending |
 | PROJ-03 | Phase 4 | Pending |

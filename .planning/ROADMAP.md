@@ -8,7 +8,7 @@
 ## Phases
 
 - [x] **Phase 1: MIDI Foundation** — Fix threading bugs, harden USB connection, establish iOS MIDI layer (completed 2026-03-28)
-- [ ] **Phase 2: Android Device Management** — Real device stats, full backup/restore, performance screen hardening
+- [x] **Phase 2: Android Device Management** — Real device stats, full backup/restore, performance screen hardening (completed 2026-03-30)
 - [ ] **Phase 3: iOS Native UI** — Build all four SwiftUI screens mirroring the Android Compose screens
 - [ ] **Phase 4: Project Management** — Project browser, project-level backup, backup library, share sheet
 
@@ -49,7 +49,7 @@ Plans:
 4. User can restore the EP-133 from a backup file selected from phone storage, with a confirmation step before overwrite.
 5. User can trigger any pad with multi-touch and velocity, preview a sound before assigning it, program a 16-step beat synced to device transport, and see pads highlighted by scale membership.
 
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
 - [ ] 02-android-device-management-02-PLAN.md — Wave 0 test stubs + SysEx protocol + accumulation buffer + device stats + PAK backup/restore + multi-touch + scale lock + sound preview + MIDI transport
@@ -110,7 +110,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. MIDI Foundation | 3/1 | Complete   | 2026-03-28 |
-| 2. Android Device Management | 0/1 | Not started | — |
+| 2. Android Device Management | 1/1 | Complete   | 2026-03-30 |
 | 3. iOS Native UI | 0/4 | Not started | — |
 | 4. Project Management | 0/5 | Not started | — |
 
