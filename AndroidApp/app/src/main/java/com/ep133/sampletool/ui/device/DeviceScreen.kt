@@ -440,17 +440,34 @@ private fun DeviceCard(state: DeviceState) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(modifier = Modifier.height(4.dp))
+            val storageProgress = if (state.connected && state.storageUsedBytes != null && state.storageTotalBytes != null && state.storageTotalBytes > 0) {
+                (state.storageUsedBytes.toFloat() / state.storageTotalBytes.toFloat()).coerceIn(0f, 1f)
+            } else 0f
+            val storageLabel = when {
+                !state.connected -> "--"
+                state.storageUsedBytes != null && state.storageTotalBytes != null && state.storageTotalBytes > 0 ->
+                    "${(storageProgress * 100).toInt()}% used"
+                else -> null  // null = loading
+            }
             LinearProgressIndicator(
-                progress = { if (state.connected) 0.42f else 0f },
+                progress = { storageProgress },
                 modifier = Modifier.fillMaxWidth(),
                 color = MaterialTheme.colorScheme.primary,
                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
             )
-            Text(
-                text = if (state.connected) "42% used" else "--",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (storageLabel != null) {
+                Text(
+                    text = storageLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (state.connected) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(12.dp),
+                    strokeWidth = 1.5.dp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
