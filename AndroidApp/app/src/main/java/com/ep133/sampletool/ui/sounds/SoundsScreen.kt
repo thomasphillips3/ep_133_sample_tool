@@ -20,6 +20,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material3.FilterChip
@@ -76,6 +77,9 @@ class SoundsViewModel(
     private val _currentGroup = MutableStateFlow(PadChannel.A)
     val currentGroup: StateFlow<PadChannel> = _currentGroup
 
+    /** Active preview noteOff job — cancelled when a new preview starts (D-21). */
+    private var previewJob: kotlinx.coroutines.Job? = null
+
     val filteredSounds: StateFlow<List<EP133Sound>> =
         combine(_query, _selectedCategory) { query, category ->
             EP133Sounds.ALL.filter { sound ->
@@ -98,6 +102,23 @@ class SoundsViewModel(
     fun loadSoundToPad(sound: EP133Sound, pad: Pad) {
         midi.loadSoundToPad(sound.number, padNote = pad.note, padChannel = pad.midiChannel)
         _selectedSound.value = null
+    }
+
+    /**
+     * Preview a sound by sending noteOn on MIDI channel 9 (EP-133 preview channel).
+     * Cancels any ongoing preview, fires noteOn immediately, then noteOff after 500 ms.
+     *
+     * Uses sound.number as the note (clamped to 0-127) on channel 9 (D-21).
+     */
+    fun previewSound(sound: EP133Sound) {
+        previewJob?.cancel()
+        val note = (sound.number - 1).coerceIn(0, 127)
+        val previewChannel = 9  // MIDI channel 10 = index 9
+        midi.noteOn(note, velocity = 100, ch = previewChannel)
+        previewJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(500)
+            midi.noteOff(note, ch = previewChannel)
+        }
     }
 }
 
@@ -151,6 +172,7 @@ fun SoundsScreen(viewModel: SoundsViewModel) {
                     items(categorySounds, key = { it.number }) { sound ->
                         SoundRow(
                             sound = sound,
+                            onPreview = { viewModel.previewSound(sound) },
                             onAssign = { viewModel.selectSoundForAssign(sound) },
                         )
                     }
@@ -270,6 +292,7 @@ private fun CategoryHeader(category: SoundCategory) {
 @Composable
 private fun SoundRow(
     sound: EP133Sound,
+    onPreview: () -> Unit,
     onAssign: () -> Unit,
 ) {
     Row(
@@ -306,6 +329,15 @@ private fun SoundRow(
                 text = categoryLabel.uppercase(),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        // Preview button — plays noteOn on channel 9 for 500ms (D-21)
+        IconButton(onClick = onPreview) {
+            Icon(
+                imageVector = Icons.Default.PlayArrow,
+                contentDescription = "Preview sound",
+                tint = MaterialTheme.colorScheme.secondary,
             )
         }
 

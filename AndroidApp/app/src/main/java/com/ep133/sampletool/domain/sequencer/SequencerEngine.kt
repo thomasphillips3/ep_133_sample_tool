@@ -83,6 +83,8 @@ class SequencerEngine(private val midi: MIDIRepository) {
     fun play() {
         if (_state.value.playing) return
         _state.update { it.copy(playing = true, currentStep = -1) }
+        // MIDI Start (0xFA) — notify connected devices that sequence playback begins (D-22)
+        midi.sendRawBytes(byteArrayOf(0xFA.toByte()))
         playJob = scope.launch { playLoop() }
     }
 
@@ -90,6 +92,8 @@ class SequencerEngine(private val midi: MIDIRepository) {
         playJob?.cancel()
         playJob = null
         midi.allNotesOff()
+        // MIDI Stop (0xFC) — notify connected devices that playback has stopped (D-22)
+        midi.sendRawBytes(byteArrayOf(0xFC.toByte()))
         _state.update { it.copy(playing = false) }
     }
 
@@ -183,6 +187,12 @@ class SequencerEngine(private val midi: MIDIRepository) {
                 val step = (stepCount % STEP_COUNT).toInt()
                 _state.update { it.copy(currentStep = step) }
 
+                val stepDurationMs = 60_000.0 / currentState.bpm / 4.0
+
+                // MIDI Clock (0xF8): send first tick immediately with noteOn, then 5 more spaced
+                // across the step. 24 PPQN / 4 steps-per-beat = 6 clocks per step (D-22).
+                midi.sendRawBytes(byteArrayOf(0xF8.toByte()))
+
                 // Fire notes for active steps
                 currentState.tracks.forEach { track ->
                     if (track.steps[step] > 0) {
@@ -191,7 +201,6 @@ class SequencerEngine(private val midi: MIDIRepository) {
                 }
 
                 // Schedule note-off at 80% of step duration
-                val stepDurationMs = 60_000.0 / currentState.bpm / 4.0
                 val noteOffDelay = (stepDurationMs * 0.8).toLong()
                 scope.launch {
                     delay(noteOffDelay)
@@ -199,6 +208,15 @@ class SequencerEngine(private val midi: MIDIRepository) {
                         if (track.steps[step] > 0) {
                             midi.noteOff(track.note, track.channel)
                         }
+                    }
+                }
+
+                // Send remaining 5 clock ticks spaced evenly across the step (D-22)
+                val clockIntervalMs = (stepDurationMs / 6.0).toLong().coerceAtLeast(1L)
+                scope.launch {
+                    repeat(5) {
+                        delay(clockIntervalMs * (it + 1))
+                        midi.sendRawBytes(byteArrayOf(0xF8.toByte()))
                     }
                 }
 

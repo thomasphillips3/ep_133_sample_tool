@@ -14,5 +14,6 @@ interface MIDIPort {
     fun refreshDevices()
     fun startListening(portId: String)
     fun closeAllListeners()
+    fun prewarmSendPort(portId: String)
     fun close()
 }
