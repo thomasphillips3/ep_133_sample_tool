@@ -49,12 +49,10 @@ Plans:
 4. User can restore the EP-133 from a backup file selected from phone storage, with a confirmation step before overwrite.
 5. User can trigger any pad with multi-touch and velocity, preview a sound before assigning it, program a 16-step beat synced to device transport, and see pads highlighted by scale membership.
 
-### Plans
-- Reverse-engineer EP-133 SysEx protocol — map device stat query, full backup dump, and restore messages from `data/index.js`; document findings in `.planning/research/SYSEX_PROTOCOL.md`
-- Implement SysEx accumulation buffer — handle fragmented `onSend()` delivery on Android before any backup work begins
-- Build `ProjectManager` domain component — SAF file I/O with `ActivityResultContracts.CreateDocument`/`OpenDocument`; typed project file model via `kotlinx-serialization-json`
-- Wire real device stats to DeviceScreen — SysEx query on connect; replace all hardcoded values
-- Implement full backup/restore on Android — SysEx dump to file, restore from file with confirmation; fix `SampleManagerPanel` WebView bridge gap
+**Plans:** 1 plan
+
+Plans:
+- [ ] 02-android-device-management-02-PLAN.md — Wave 0 test stubs + SysEx protocol + accumulation buffer + device stats + PAK backup/restore + multi-touch + scale lock + sound preview + MIDI transport
 
 **UI hint**: yes
 **Dependencies**: Phase 1
@@ -112,10 +110,10 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. MIDI Foundation | 3/1 | Complete   | 2026-03-28 |
-| 2. Android Device Management | 0/5 | Not started | — |
+| 2. Android Device Management | 0/1 | Not started | — |
 | 3. iOS Native UI | 0/4 | Not started | — |
 | 4. Project Management | 0/5 | Not started | — |
 
 ---
 *Roadmap created: 2026-03-28*
-*Last updated: 2026-03-28 — Phase 1 plans created*
+*Last updated: 2026-03-30 — Phase 2 plan created*
