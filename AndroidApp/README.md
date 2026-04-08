@@ -45,7 +45,8 @@ MainActivity
         ├── PadsScreen       — 16-pad grid, multi-touch velocity
         ├── BeatsScreen      — 16-step sequencer, EDIT/LIVE modes
         ├── SoundsScreen     — EP-133 sound browser, preview
-        ├── ChordsScreen     — Chord progression builder, offline synth preview
+        ├── ChordsScreen     — Chord browser + offline synth preview
+        │     └── ChordBuilderScreen — Custom chord builder, push-to-KO-II via MIDI
         └── DeviceScreen     — Device stats, PAK backup/restore
               └── SampleManagerActivity (WebView) — legacy sample manager
 ```
@@ -87,6 +88,7 @@ app/src/main/java/com/ep133/sampletool/
 Unit tests live in `app/src/test/`. Instrumented tests in `app/src/androidTest/`.
 
 ```bash
-./gradlew :app:testDebugUnitTest          # JVM unit tests
+./gradlew :app:testDebugUnitTest          # All JVM unit tests
+./gradlew :app:testDebugUnitTest --tests "com.ep133.sampletool.ChordsViewModelTest"  # Single class
 ./gradlew :app:connectedDebugAndroidTest  # Instrumented (requires device/emulator)
 ```
