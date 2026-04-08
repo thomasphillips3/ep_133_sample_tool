@@ -21,3 +21,12 @@ AndroidApp/build/
 AndroidApp/app/build/
 AndroidApp/local.properties
 AndroidApp/app/src/main/assets/data/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# macOS
+._*

@@ -4,6 +4,11 @@
   "version": "1.2.0",
   "description": "EP-133 Sample Tool - 1.2.0",
   "main": "main.js",
+  "homepage": "https://github.com/thomasphillips3/ep_133_sample_tool",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thomasphillips3/ep_133_sample_tool.git"
+  },
   "scripts": {
     "start": "electron . --ozone-platform=wayland",
     "package": "electron-builder"
@@ -28,7 +33,7 @@
     "sample",
     "tool"
   ],
-  "author": "homeless",
+  "author": "Thomas Phillips",
   "devDependencies": {
     "electron": "^31.4.0",
     "electron-builder": "^24.13.3"

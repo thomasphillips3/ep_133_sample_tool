@@ -1,6 +1,10 @@
-name: Build Electron App
+name: Build · Electron
 
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -32,4 +36,3 @@ jobs:
           name: ${{ matrix.os }}-build
           path: |
             dist/*.*
-
