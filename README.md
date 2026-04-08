@@ -1,3 +1,9 @@
+## working with latest firmware as of May 2025 :)
+
+the features described below are currently broken. as of right now, the app is fully offline, but the zoom in feature and custom colors, etc are not working at all. sorry :)
+
+---
+
 # EP-133 Sample Tool - Offline Version
 
 ![sample tool](zoom_in.png)
