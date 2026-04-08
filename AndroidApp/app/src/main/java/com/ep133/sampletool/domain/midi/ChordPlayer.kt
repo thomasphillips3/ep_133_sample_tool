@@ -6,19 +6,39 @@ import com.ep133.sampletool.domain.model.resolveChordMidiNotes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
-class ChordPlayer(private val midi: MIDIRepository) {
+/**
+ * Plays chords and progressions via MIDI.
+ *
+ * Routes through [MIDIRepository] when an EP-133 is connected, or falls back to
+ * [LocalSynth] (phone speakers) when offline. Callers do not need to check
+ * connection state — routing is handled internally.
+ */
+class ChordPlayer(
+    private val midi: MIDIRepository,
+    private val localSynth: LocalSynth = LocalSynth(),
+) {
 
     private var currentNotes: List<Int> = emptyList()
 
-    fun playChord(degree: ChordDegree, keyRoot: String, velocity: Int = 90, octave: Int = 3) {
+    private val isConnected: Boolean get() = midi.deviceState.value.connected
+
+    fun playChord(degree: ChordDegree, keyRoot: String, velocity: Int = 90, octave: Int = 4) {
         stopCurrentChord()
         val notes = resolveChordMidiNotes(degree, keyRoot, octave)
         currentNotes = notes
-        notes.forEach { midi.noteOn(it, velocity) }
+        if (isConnected) {
+            notes.forEach { midi.noteOn(it, velocity) }
+        } else {
+            notes.forEach { localSynth.noteOn(it, velocity) }
+        }
     }
 
     fun stopCurrentChord() {
-        currentNotes.forEach { midi.noteOff(it) }
+        if (isConnected) {
+            currentNotes.forEach { midi.noteOff(it) }
+        } else {
+            localSynth.allNotesOff()
+        }
         currentNotes = emptyList()
     }
 
@@ -45,5 +65,11 @@ class ChordPlayer(private val midi: MIDIRepository) {
             onStep(-1)
             throw e
         }
+    }
+
+    /** Release resources. Call when ViewModel is cleared. */
+    fun close() {
+        stopCurrentChord()
+        localSynth.close()
     }
 }

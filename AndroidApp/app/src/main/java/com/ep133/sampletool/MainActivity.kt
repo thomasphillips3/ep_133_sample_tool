@@ -65,7 +65,7 @@ class MainActivity : ComponentActivity() {
         val padsViewModel = PadsViewModel(midiRepo)
         val beatsViewModel = BeatsViewModel(sequencer, midiRepo)
         val soundsViewModel = SoundsViewModel(midiRepo)
-        val chordsViewModel = ChordsViewModel(chordPlayer)
+        val chordsViewModel = ChordsViewModel(chordPlayer, midiRepo)
         val deviceViewModel = DeviceViewModel(midiRepo)
 
         // SAF launchers for backup/restore — MUST be registered before setContent (Activity lifecycle)

@@ -21,10 +21,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -35,6 +37,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -47,6 +50,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ep133.sampletool.domain.model.ChordDegree
+import com.ep133.sampletool.domain.model.PadChannel
 import com.ep133.sampletool.domain.model.midiToNoteName
 import com.ep133.sampletool.domain.model.resolveChordMidiNotes
 import com.ep133.sampletool.domain.model.resolveChordName
@@ -63,6 +67,11 @@ fun ChordBuilderScreen(
     val playingStep by viewModel.playingStep.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
     val looping by viewModel.looping.collectAsState()
+    val deviceState by viewModel.deviceState.collectAsState()
+    val selectedSound by viewModel.selectedSound.collectAsState()
+    val showSoundPicker by viewModel.showSoundPicker.collectAsState()
+    val chordMapGroup by viewModel.chordMapGroup.collectAsState()
+    val showGroupPicker by viewModel.showGroupPicker.collectAsState()
 
     val prog = progression ?: return
     var tappedIndex by remember { mutableIntStateOf(-1) }
@@ -82,7 +91,24 @@ fun ChordBuilderScreen(
             onToggleLoop = { viewModel.toggleLoop() },
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+
+        SoundSelectorRow(sound = selectedSound, onClick = viewModel::openSoundPicker)
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        when {
+            !deviceState.connected -> {
+                OfflineNotice()
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+            chordMapGroup != null -> {
+                ChordMapBanner(group = chordMapGroup!!, onCancel = viewModel::cancelChordMap)
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
 
         KeyBpmRow(
             keyRoot = keyRoot,
@@ -132,7 +158,8 @@ fun ChordBuilderScreen(
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             FilledTonalButton(
                 onClick = onSendToBeats,
@@ -141,8 +168,25 @@ fun ChordBuilderScreen(
             ) {
                 Text(
                     text = "SEND TO BEATS",
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleSmall,
                 )
+            }
+
+            if (deviceState.connected && selectedSound != null) {
+                FilledIconButton(
+                    onClick = viewModel::openGroupPicker,
+                    modifier = Modifier.size(48.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = TEColors.Teal,
+                        contentColor = Color.White,
+                    ),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Usb,
+                        contentDescription = "Push to KO-II",
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
             }
 
             OutlinedButton(
@@ -159,13 +203,64 @@ fun ChordBuilderScreen(
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "LOOP",
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleSmall,
                     color = if (looping) TEColors.Orange else MaterialTheme.colorScheme.onSurface,
                 )
             }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
+    }
+
+    // Bottom sheets
+    if (showSoundPicker) {
+        SoundPickerSheet(
+            onSoundSelected = viewModel::selectSound,
+            onDismiss = viewModel::dismissSoundPicker,
+        )
+    }
+    if (showGroupPicker && selectedSound != null) {
+        GroupPickerSheet(
+            soundName = selectedSound!!.name,
+            progressionName = prog.name,
+            onGroupSelected = viewModel::programToGroup,
+            onDismiss = viewModel::dismissGroupPicker,
+        )
+    }
+}
+
+@Composable
+private fun ChordMapBanner(group: PadChannel, onCancel: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = TEColors.Teal.copy(alpha = 0.12f),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.MusicNote,
+                contentDescription = null,
+                tint = TEColors.Teal,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "GROUP ${group.name} — press pads to play chords",
+                style = MaterialTheme.typography.bodySmall,
+                color = TEColors.Teal,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onCancel) {
+                Text(
+                    text = "CANCEL",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TEColors.Teal,
+                )
+            }
+        }
     }
 }
 
