@@ -15,8 +15,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowCompat
+import android.media.AudioManager
 import com.ep133.sampletool.domain.midi.ChordPlayer
 import com.ep133.sampletool.domain.midi.MIDIRepository
+import com.ep133.sampletool.domain.midi.NativeSynth
 import com.ep133.sampletool.domain.sequencer.SequencerEngine
 import com.ep133.sampletool.midi.MIDIManager
 import androidx.lifecycle.lifecycleScope
@@ -61,7 +63,8 @@ class MainActivity : ComponentActivity() {
         midiRepo = MIDIRepository(midiManager)
         sequencer = SequencerEngine(midiRepo)
 
-        val chordPlayer = ChordPlayer(midiRepo)
+        val nativeSynth = NativeSynth(getSystemService(AudioManager::class.java))
+        val chordPlayer = ChordPlayer(midiRepo, nativeSynth)
         val padsViewModel = PadsViewModel(midiRepo)
         val beatsViewModel = BeatsViewModel(sequencer, midiRepo)
         val soundsViewModel = SoundsViewModel(midiRepo)

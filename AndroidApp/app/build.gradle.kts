@@ -15,6 +15,12 @@ android {
         versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        externalNativeBuild {
+            cmake {
+                arguments("-DANDROID_STL=c++_shared")
+            }
+        }
     }
 
     buildTypes {
@@ -38,6 +44,13 @@ android {
 
     buildFeatures {
         compose = true
+        prefab = true   // enables Oboe AAR prefab headers for CMake
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("CMakeLists.txt")
+        }
     }
 
     composeOptions {
@@ -78,6 +91,9 @@ dependencies {
 
     // JSON parsing for EP-133 data
     implementation("org.json:json:20231013")
+
+    // Oboe — low-latency audio via AAudio (NDK)
+    implementation("com.google.oboe:oboe:1.9.3")
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")
