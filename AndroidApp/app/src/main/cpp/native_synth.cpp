@@ -9,36 +9,63 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-static constexpr int   MAX_VOICES   = 8;
-static constexpr float A4_FREQ      = 440.0f;
-static constexpr float A4_MIDI      = 69.0f;
-static constexpr float TWO_PI       = 6.28318530718f;
+static constexpr int   MAX_VOICES  = 8;
+static constexpr float A4_FREQ     = 440.0f;
+static constexpr float A4_MIDI     = 69.0f;
+static constexpr float TWO_PI      = 6.28318530718f;
 
-// One polyphonic voice. Non-atomic fields are written only when active == false,
-// protected by the release/acquire fence on the active flag.
+// Lo-fi Rhodes character constants
+static constexpr float kLFOFreq    = 5.0f;    // tremolo rate (Hz)
+static constexpr float kTremDepth  = 0.08f;   // ±8% amplitude tremolo
+static constexpr float kDrive      = 0.8f;    // saturation drive
+static constexpr float kBitScale   = 2048.0f; // 12-bit quantization (MPC 60 / SP-1200)
+
+// ── Voice ─────────────────────────────────────────────────────────────────────
+//
+// 2-operator FM (DX7 electric piano algorithm):
+//   modulator = sin(phaseM) × modIndex
+//   carrier   = sin(phaseC + modulator)
+//
+// modIndex decays from a velocity-scaled peak to 0 over 200 ms, giving a bright
+// clangorous attack that fades to a warm pure sine — the defining Rhodes character.
+//
+// Per-note LFO phase offset staggers tremolo between notes in a chord, producing
+// a natural chorusing effect as the phases drift.
+
 struct Voice {
     std::atomic<bool> active{false};
     std::atomic<bool> releasing{false};
 
     int   midiNote{-1};
     float frequency{440.0f};
-    float amplitude{0.0f};     // peak amplitude (velocity-scaled)
-    float phase{0.0f};
-    float phase2{0.0f};        // 2nd harmonic
-    float phase3{0.0f};        // 3rd harmonic
+    float amplitude{0.0f};
+
+    float phaseC{0.0f};       // carrier phase   [0, 1)
+    float phaseM{0.0f};       // modulator phase [0, 1)
+    float phaseLFO{0.0f};     // tremolo LFO phase [0, 1)
+
+    float modIndex{0.0f};     // current FM modulation depth
+    float modDecayRate{0.0f}; // per-sample decrease of modIndex
+
     float envGain{0.0f};
-    float attackRate{0.0f};    // envGain increase per sample
-    float decayRate{0.0f};     // envGain decrease per sample (attack→sustain)
+    float attackRate{0.0f};
+    float decayRate{0.0f};
     float sustainLevel{0.0f};
-    float releaseRate{0.0f};   // envGain decrease per sample on release
+    float releaseRate{0.0f};
     bool  inAttack{true};
 };
+
+// ── NativeSynth ───────────────────────────────────────────────────────────────
 
 class NativeSynth : public oboe::AudioStreamDataCallback {
 public:
     std::array<Voice, MAX_VOICES> voices{};
     oboe::AudioStream* stream{nullptr};
     int sampleRate{48000};
+
+    // Precomputed constants (set once in start())
+    float kDriveNorm{1.0f};
+    float kBitScaleInv{1.0f / kBitScale};
 
     bool start(int requestedSr) {
         oboe::AudioStreamBuilder builder;
@@ -61,7 +88,10 @@ public:
             return false;
         }
 
-        sampleRate = stream->getSampleRate();
+        sampleRate   = stream->getSampleRate();
+        kDriveNorm   = tanhf(kDrive);
+        kBitScaleInv = 1.0f / kBitScale;
+
         LOGI("Oboe open: sr=%d burst=%d sharing=%s",
              sampleRate,
              stream->getFramesPerBurst(),
@@ -78,7 +108,7 @@ public:
     }
 
     void noteOn(int midiNote, int velocity) {
-        // Find a free voice (active == false). On overflow, steal a releasing voice.
+        // Find a free voice; on overflow steal a releasing one
         Voice* target = nullptr;
         for (auto& v : voices) {
             if (!v.active.load(std::memory_order_acquire)) { target = &v; break; }
@@ -88,21 +118,33 @@ public:
                 if (v.releasing.load(std::memory_order_relaxed)) { target = &v; break; }
             }
         }
-        if (!target) return; // 8 sustained voices — drop note
+        if (!target) return; // 8 active sustained notes — drop
 
-        float freq   = A4_FREQ * powf(2.0f, (midiNote - A4_MIDI) / 12.0f);
-        float amp    = (velocity / 127.0f) * 0.6f;
-        float atk    = sampleRate * 0.01f;          // 10 ms attack
-        float dec    = sampleRate * 2.0f;           // 2 s decay
-        float sus    = amp * 0.5f;
-        float rel    = sampleRate * 0.1f;           // 100 ms release
+        float freq = A4_FREQ * powf(2.0f, (midiNote - A4_MIDI) / 12.0f);
+        float amp  = (velocity / 127.0f) * 0.55f;
+        float sr   = static_cast<float>(sampleRate);
+
+        // Amplitude envelope
+        float atk = sr * 0.020f;   // 20 ms attack
+        float dec = sr * 0.600f;   // 600 ms decay
+        float sus = amp * 0.25f;   // 25% sustain level
+        float rel = sr * 0.150f;   // 150 ms release
+
+        // FM: velocity-sensitive initial modulation depth (0–2 range)
+        float peakMod      = (velocity / 127.0f) * 2.0f;
+        float modDecaySamp = sr * 0.200f; // FM brightness fades over 200 ms
+
+        // Per-note LFO phase offset staggers tremolo in chords (pseudo-random per pitch)
+        float lfoOffset = fmodf(static_cast<float>(midiNote) * 0.137f, 1.0f);
 
         target->midiNote     = midiNote;
         target->frequency    = freq;
         target->amplitude    = amp;
-        target->phase        = 0.0f;
-        target->phase2       = 0.0f;
-        target->phase3       = 0.0f;
+        target->phaseC       = 0.0f;
+        target->phaseM       = 0.0f;
+        target->phaseLFO     = lfoOffset;
+        target->modIndex     = peakMod;
+        target->modDecayRate = peakMod / modDecaySamp;
         target->envGain      = 0.0f;
         target->attackRate   = amp / atk;
         target->decayRate    = (amp - sus) / dec;
@@ -110,7 +152,7 @@ public:
         target->releaseRate  = amp / rel;
         target->inAttack     = true;
         target->releasing.store(false, std::memory_order_relaxed);
-        // Release fence: all above writes visible before active becomes true
+        // Release fence: all writes above are visible before active becomes true
         target->active.store(true, std::memory_order_release);
     }
 
@@ -139,8 +181,8 @@ public:
         }
     }
 
-    // Called on a real-time native thread managed by Oboe.
-    // No allocations, no locks, no JNI calls in this method.
+    // ── Audio callback ────────────────────────────────────────────────────────
+    // Real-time native thread. No allocations, no locks, no JNI.
     oboe::DataCallbackResult onAudioReady(
             oboe::AudioStream* /*stream*/,
             void* audioData,
@@ -149,14 +191,19 @@ public:
         auto* out = static_cast<float*>(audioData);
         for (int i = 0; i < numFrames; ++i) out[i] = 0.0f;
 
+        float sr       = static_cast<float>(sampleRate);
+        float lfoIncr  = kLFOFreq / sr;
+
         for (auto& v : voices) {
             // Acquire fence pairs with the release store in noteOn()
             if (!v.active.load(std::memory_order_acquire)) continue;
 
             float freq         = v.frequency;
-            float phase        = v.phase;
-            float phase2       = v.phase2;
-            float phase3       = v.phase3;
+            float phaseC       = v.phaseC;
+            float phaseM       = v.phaseM;
+            float phaseLFO     = v.phaseLFO;
+            float modIndex     = v.modIndex;
+            float modDecayRate = v.modDecayRate;
             float envGain      = v.envGain;
             float amp          = v.amplitude;
             float attackRate   = v.attackRate;
@@ -166,18 +213,13 @@ public:
             bool  inAttack     = v.inAttack;
             bool  stillActive  = true;
 
-            float freqIncr  = freq / sampleRate;
-            float freqIncr2 = freqIncr * 2.0f;
-            float freqIncr3 = freqIncr * 3.0f;
+            float freqIncr = freq / sr;
 
             for (int i = 0; i < numFrames; ++i) {
+                // ── Amplitude envelope ────────────────────────────────────────
                 if (v.releasing.load(std::memory_order_relaxed)) {
                     envGain -= releaseRate;
-                    if (envGain <= 0.0f) {
-                        envGain = 0.0f;
-                        stillActive = false;
-                        break;
-                    }
+                    if (envGain <= 0.0f) { envGain = 0.0f; stillActive = false; break; }
                 } else if (inAttack) {
                     envGain += attackRate;
                     if (envGain >= amp) { envGain = amp; inAttack = false; }
@@ -186,23 +228,45 @@ public:
                     if (envGain < sustainLevel) envGain = sustainLevel;
                 }
 
-                // Additive synthesis: fundamental (60%) + 2nd (25%) + 3rd (10%) harmonics
-                out[i] += (sinf(phase  * TWO_PI) * 0.60f
-                         + sinf(phase2 * TWO_PI) * 0.25f
-                         + sinf(phase3 * TWO_PI) * 0.10f)
-                         * envGain;
+                // ── FM synthesis ──────────────────────────────────────────────
+                float mod     = sinf(phaseM * TWO_PI) * modIndex;
+                float carrier = sinf((phaseC + mod) * TWO_PI);
 
-                phase  += freqIncr;  if (phase  >= 1.0f) phase  -= 1.0f;
-                phase2 += freqIncr2; if (phase2 >= 1.0f) phase2 -= 1.0f;
-                phase3 += freqIncr3; if (phase3 >= 1.0f) phase3 -= 1.0f;
+                // ── Tremolo ───────────────────────────────────────────────────
+                float tremolo = 1.0f + kTremDepth * sinf(phaseLFO * TWO_PI);
+
+                out[i] += carrier * envGain * tremolo;
+
+                // Decay FM modulation independently of amplitude envelope
+                modIndex -= modDecayRate;
+                if (modIndex < 0.0f) modIndex = 0.0f;
+
+                // Phase updates — normalized [0, 1) to avoid float precision drift
+                phaseC   += freqIncr; if (phaseC   >= 1.0f) phaseC   -= 1.0f;
+                phaseM   += freqIncr; if (phaseM   >= 1.0f) phaseM   -= 1.0f;
+                phaseLFO += lfoIncr;  if (phaseLFO >= 1.0f) phaseLFO -= 1.0f;
             }
 
-            v.phase    = phase;
-            v.phase2   = phase2;
-            v.phase3   = phase3;
-            v.envGain  = envGain;
-            v.inAttack = inAttack;
+            v.phaseC    = phaseC;
+            v.phaseM    = phaseM;
+            v.phaseLFO  = phaseLFO;
+            v.modIndex  = modIndex;
+            v.envGain   = envGain;
+            v.inAttack  = inAttack;
             if (!stillActive) v.active.store(false, std::memory_order_relaxed);
+        }
+
+        // ── Post-mix: soft saturation + 12-bit quantization ──────────────────
+        // tanh drive gives natural compression on full chords; roundf quantization
+        // replicates the MPC 60 / SP-1200 12-bit noise floor (≈ −72 dBFS).
+        float driveNorm   = kDriveNorm;
+        float bitScale    = kBitScale;
+        float bitScaleInv = kBitScaleInv;
+
+        for (int i = 0; i < numFrames; ++i) {
+            float x = tanhf(out[i] * kDrive) / driveNorm;
+            x = roundf(x * bitScale) * bitScaleInv;
+            out[i] = x;
         }
 
         return oboe::DataCallbackResult::Continue;
