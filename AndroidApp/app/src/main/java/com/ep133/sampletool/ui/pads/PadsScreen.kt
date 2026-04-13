@@ -100,6 +100,9 @@ class PadsViewModel(private val midi: MIDIRepository) : ViewModel() {
     }
 
     fun selectChannel(channel: PadChannel) {
+        if (channel != _selectedChannel.value) {
+            midi.programChange(channel.ordinal)
+        }
         _selectedChannel.value = channel
         _pressedIndices.value = emptySet()
     }
